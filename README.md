@@ -64,6 +64,10 @@ Training produces `checkpoints/cann_snn15m_v2_final.pt`.
 
 ## Generation
 
+> Note: 15.3M models (RINA and GPT-2 alike) are too small to produce fluent long text.
+> Generation quality is not a meaningful metric at this scale — ppl is the reliable metric.
+> See Section 5 of the training log for generation examples at 15M.
+
 ```bash
 python scripts/generate.py       # requires trained checkpoint
 ```

@@ -1,4 +1,8 @@
-"""Autoregressive generation demo for SNN v2."""
+"""Autoregressive generation demo for SNN v2.
+
+Note: 15.3M is too small for fluent generation. The output will be
+abstract/random-looking. This is not a model bug — ppl is the reliable
+metric at this scale, not generation quality."""
 import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 os.environ["HF_DATASETS_OFFLINE"] = "1"; os.environ["HF_HUB_OFFLINE"] = "1"
