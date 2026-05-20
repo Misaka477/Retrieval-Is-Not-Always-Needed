@@ -14,4 +14,6 @@ docs/RINA实验日志.md
 docs/KVR_实验全记录.md
 checkpoints/*.pt
 tokenizers/*
+paper/
+RINA_CHECKLIST.md
 
