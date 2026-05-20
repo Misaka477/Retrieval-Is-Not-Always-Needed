@@ -51,7 +51,7 @@ python scripts/quick_test.py     # 10s smoke test (no external data)
 ## Training
 
 ```bash
-# Full training (13 epoch, ~4h on RTX 3070 Ti)
+# Full training (13 epoch, ~10h on RTX 3070 Ti)
 python scripts/train.py          # → ppl ~35.4 at ep10
 
 # Warm-restart for best result (34.7 ppl)
@@ -152,7 +152,7 @@ requirements.txt            — torch, tokenizers, datasets, tqdm, transformers
 ## Hardware
 
 Developed and tested on a single **NVIDIA GeForce RTX 3070 Ti Laptop (8 GB VRAM)**.  
-Training time: ~4 hours for 13 epochs on WikiText-103 (38M tokens).
+Training time: ~10 hours for 13 epochs on WikiText-103 (38M tokens).
 
 ## References
 
@@ -197,7 +197,7 @@ A(h̃) = h̃ + α·(S(h̃·Pᵀ)·P − h̃)   ← attractor
 
 ```
 reproduce.bat                    # 一键：装依赖 + 冒烟测试
-python scripts/train.py          # 训练（13 epoch, ~4h）
+python scripts/train.py          # 训练（13 epoch, ~10h）
 python scripts/warm_restart.py   # 续训拿最佳 ppl 34.7
 python scripts/generate.py       # 生成 demo
 ```
@@ -219,7 +219,7 @@ archive/        — 废弃实验，未删除
 ## 硬件
 
 单张 **NVIDIA GeForce RTX 3070 Ti Laptop (8 GB VRAM)** 开发。  
-WikiText-103（38M tokens）训练约 4 小时。
+WikiText-103（38M tokens）训练约 10 小时。
 
 ## 参考
 
