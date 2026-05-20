@@ -207,7 +207,7 @@ A(h̃) = h̃ + α·(S(h̃·Pᵀ)·P − h̃)   ← attractor
 reproduce.bat                    # 一键：装依赖 + 冒烟测试
 python scripts/train.py          # 训练（13 epoch, ~10h）
 python scripts/warm_restart.py   # 续训拿最佳 ppl 34.7
-python scripts/generate.py       # 生成 demo
+python scripts/generate.py       # 生成 demo（15M 参数量无法产出流畅长文本，ppl 才是可靠指标）
 ```
 
 ## ⚠️ import 顺序（防静默死锁）
