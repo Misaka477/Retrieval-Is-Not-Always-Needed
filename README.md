@@ -165,7 +165,6 @@ Training time: ~10 hours for 13 epochs on WikiText-103 (38M tokens).
 - `docs/RINA实验日志.md` — full experiment log (May 15-21, 2026, 4274 lines)
 - `ORIGIN.md` — project philosophy and technical motivation
 - `docs/KVR_实验全记录.md` — predecessor experiment (KVR)
-- `RINA_CHECKLIST.md` — development discipline checklist
 
 ---
 
@@ -234,4 +233,4 @@ WikiText-103（38M tokens）训练约 10 小时。
 - `docs/RINA实验日志.md` — 完整实验记录（4274 行）
 - `ORIGIN.md` — 项目哲学与技术动机
 - `docs/KVR_实验全记录.md` — 前代实验
-- `RINA_CHECKLIST.md` — 开发纪律清单
+
