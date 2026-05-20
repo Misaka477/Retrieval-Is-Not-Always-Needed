@@ -1,0 +1,17 @@
+{
+    "dm": 840,
+    "np": 4096,
+    "seq": 64,
+    "bs": 8,
+    "ae": 2,
+    "epochs": 13,
+    "lr": 3.0e-4,
+    "error_threshold": 1.0,
+    "hebbian_lr": 0.01,
+    "inhibition_threshold": 0.8,
+    "pred_lambda": 0.0,
+    "weight_decay": 0.01,
+    "beta2": 0.999,
+    "subsample": 8,
+    "n_segments": 200000
+}

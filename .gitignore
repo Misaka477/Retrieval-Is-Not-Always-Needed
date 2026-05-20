@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+*.dll
+*.exp
+*.lib
+*.pdb
+*.log
+archive/checkpoints/
+.vscode/
+
+archive/references/
+docs/RINA实验日志.md
+docs/KVR_实验全记录.md
+checkpoints/*.pt
+tokenizers/*
+
