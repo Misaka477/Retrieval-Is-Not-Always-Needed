@@ -34,6 +34,8 @@ Five core components:
 
 Multi-key NIAH (gap=128, random positions): **RINA 100%** vs GPT-2 36% (−47%).
 
+**Memory cost:** RINA slot is independent of sequence length. Transformer 70B with 1M context requires KV cache ≈ **2.6 TB**; RINA slot requires only **16 GB**, regardless of context length. Content-addressable memory fundamentally eliminates the attention scaling problem.
+
 ## Quick Start
 
 Pretrained checkpoints: [github.com/Misaka477/Retrieval-Is-Not-Always-Needed/releases/tag/v0.1.0](https://github.com/Misaka477/Retrieval-Is-Not-Always-Needed/releases/tag/v0.1.0)
@@ -201,6 +203,8 @@ A(h̃) = h̃ + α·(S(h̃·Pᵀ)·P − h̃)   ← attractor
 | 消融 (SSM-only) | 34.7 | ✅ | ⚠️ | ❌ |
 
 多 key NIAH（gap=128, 随机位置）：**RINA 100%** vs GPT-2 36%（−47%）。
+
+**记忆显存：** RINA slot 不随序列长度增长。Transformer 70B 在 1M 上下文时 KV cache ≈ **2.6 TB**；RINA slot 仅 **16 GB**，与上下文长度无关。
 
 ## 快速开始
 

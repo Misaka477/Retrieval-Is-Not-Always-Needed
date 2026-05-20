@@ -255,6 +255,7 @@ Warm-restart（ep11-12）：**34.7**（最终，反超 V1 的 34.5）。
 | Self-excitation immunity | ❌ | ✅ | ✅ |
 | Pattern collapse prevention | ❌ | ❌ | ✅ (侧抑制) |
 | Multi-modal native | ❌ | ❌ | ✅ (ViT 概念验证, ppl 4.7) |
+| **Memory cost (70B, 1M cxt)** | **KV cache ≈ 2.6 TB** | **slot 16 GB** (不随 seq 增长) | **slot 16 GB** |
 
 #### 生成 Demo
 
