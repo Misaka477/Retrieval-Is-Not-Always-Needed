@@ -252,7 +252,39 @@ Warm-restart（ep11-12）：**34.7**（最终，反超 V1 的 34.5）。
 
 ---
 
-## 7. 未来方向
+## 7. 补充实验 · Slot-Aware 训练
+
+**代码：** `scripts/train_snn_slot.py`（新建于 2026-05-21）
+
+**动机：** 真实文本 NIAH 的 22-32% recall 天花板源于 slot 是 post-hoc 加入的——模型用 10 epoch 学会"预测下一个词靠上下文"，再用 300 步学会"相信外挂记忆"。如果能从 LM 训练第一天就混入 slot 样本，预期可消除此天花板。
+
+**方法：** 在原始 SNN v2 训练之上：
+- 每模型新增 `slot_table`（vocab_size × d_model）和 `slot_proj`
+- 模型 forward 改为每步检查 slot 表并注入（非仅最后一位）
+- 训练数据 90% 正常 WikiText-103 + 10% 合成 NIAH 序列（随机 key→value 对插入随机位置，key query 固定在 seq_len-2，target value 在 seq_len-1）
+
+**关键 bug 修复链条：**
+1. slot_write 需包 `torch.no_grad()` 防止 backward 图断裂
+2. slot_table 必须在每个 batch 前清零，防止正常文本 token 偶然匹配已存储的 key 并注入噪声
+3. ppl 显示需排除 NIAH batch（否则 10% 随机噪声将累积平均拉高 50-60 ppl）
+
+**正在进行中（ep3，slot_acc=6%）：**
+
+```
+ep   ppl(LM)  slot_acc  att
+─────────────────────────────
+ 1   114.7       1%     16%
+ 2    65.1       3%     19%
+ 3    ~56         6%     20%    (进行中)
+```
+
+slot_acc 初始随机基线 0.024%（1/4096）。1% → 3% → 6% 的翻倍上升表明模型正在学习信任 slot 注入。
+
+**预计 ep10 slot_acc ~20-40%。** 若成立，后续阶段 B（纯 NIAH fine-tune 1 epoch）有望将 slot_acc 推至 80%+，真实文本 NIAH 从 22% 天花板提升至 60-80%。
+
+---
+
+## 8. 未来方向
 
 - **在线 Hebbian + lateral inhibition：** 部署后持续适应（需更大模型抑制随机噪声）
 - **自我博弈（self-play）：** 双流探索（Stream B + noise, ε 裁判）
