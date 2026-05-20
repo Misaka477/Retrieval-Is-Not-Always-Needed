@@ -251,3 +251,7 @@ WikiText-103（38M tokens）训练约 10 小时。
 - `ORIGIN.md` — 项目哲学与技术动机
 - `docs/KVR_实验全记录.md` — 前代实验
 
+## Contact
+
+rapidsound@163.com / mikotomisaka477@gmail.com
+
