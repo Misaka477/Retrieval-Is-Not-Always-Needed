@@ -213,6 +213,17 @@ python scripts/warm_restart.py   # 续训拿最佳 ppl 34.7
 python scripts/generate.py       # 生成 demo
 
 > 注意：15.3M 参数量（RINA 和 GPT-2 都是）无法产出流畅长文本。15M 下生成质量不是有意义的指标，ppl 才是可靠的语言建模评估标准。
+
+### V1 基线
+
+> V1 (CANN-SSM) 是 RINA 的前代架构 — SSM gate + attractor + slot，不含 temporal 门控和 Hebbian 可塑性。保留用于消融和直接对比。
+
+```
+python scripts/train_cann_15m.py     # V1 CANN-SSM → ppl 34.5
+python scripts/train_ablation.py     # SSM-only  → ppl 34.7
+python scripts/train_gpt2_15m.py     # GPT-2     → ppl 34.8
+python scripts/bench_seqlen.py       # 序列长度 benchmark
+```
 ```
 
 ## ⚠️ import 顺序（防静默死锁）
