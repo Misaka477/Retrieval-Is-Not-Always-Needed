@@ -82,7 +82,7 @@ python scripts/bench_niah_snn_slot.py
 python scripts/bench_niah_snn_final.py
 ```
 
-## V1 Baselines (for paper comparison)
+## V1 Baselines
 
 ```bash
 python scripts/train_cann_15m.py     # V1 CANN-SSM → ppl 34.5
