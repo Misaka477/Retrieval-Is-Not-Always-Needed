@@ -36,6 +36,8 @@ Multi-key NIAH (gap=128, random positions): **RINA 100%** vs GPT-2 36% (−47%).
 
 ## Quick Start
 
+Pretrained checkpoints: [github.com/Misaka477/Retrieval-Is-Not-Always-Needed/releases](https://github.com/Misaka477/Retrieval-Is-Not-Always-Needed/releases)
+
 ```bash
 git clone ...
 cd RINA_Project
@@ -194,6 +196,8 @@ A(h̃) = h̃ + α·(S(h̃·Pᵀ)·P − h̃)   ← attractor
 多 key NIAH（gap=128, 随机位置）：**RINA 100%** vs GPT-2 36%（−47%）。
 
 ## 快速开始
+
+预训练权重：[github.com/Misaka477/Retrieval-Is-Not-Always-Needed/releases](https://github.com/Misaka477/Retrieval-Is-Not-Always-Needed/releases)
 
 ```
 reproduce.bat                    # 一键：装依赖 + 冒烟测试
