@@ -84,6 +84,10 @@ python scripts/bench_niah_snn_final.py
 
 ## V1 Baselines
 
+> V1 (CANN-SSM) is RINA's predecessor — SSM gate + attractor + slot without temporal gating or Hebbian plasticity. Kept for direct ablation and comparison.
+
+```bash
+
 ```bash
 python scripts/train_cann_15m.py     # V1 CANN-SSM → ppl 34.5
 python scripts/train_ablation.py     # SSM-only  → ppl 34.7
