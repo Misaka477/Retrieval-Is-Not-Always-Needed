@@ -268,6 +268,7 @@ Warm-restart（ep11-12）：**34.7**（最终，反超 V1 的 34.5）。
 1. **attractor 不是 ppl 提升器——是 slot-trust 加速器。** 消融只差 0.2 ppl，但 gap=128 时 CANN 10 步学会信任 slot，ABL 200 步学不会
 2. **Gate 的交叉维度混合不可砍。** depthwise gate ppl 68.7，dense GEMM 是 attractor basin 的最低入场费
 3. **M=8 窄 GEMM 不是算法问题——是硬件物理天花板。** 递推式计算和 batched GEMM 在消费级 GPU 上存在结构性冲突。解药：换大卡（A100 bs=32）或换硬件（NPU/定制 ASIC）
+4. **"同参数量"对比本身对 RINA 不公平。** Transformer 15M = 12 层，每层参数只服务 token 一次投影。RINA 15M = 1 层，同一参数被同一 token 反复使用 64 步。seq=1024 时 RINA ppl 43 vs GPT-2 124——RINA 的参数被深度复用而非垂直分割，因此能用更少的参数吃掉更长的序列。**缩放法则应对递推架构改用"有效 FLOPs × 参数密度"而非"参数数量"作为衡量标准。**
 
 ---
 

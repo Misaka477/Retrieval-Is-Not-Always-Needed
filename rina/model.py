@@ -29,8 +29,9 @@ class TemporalSNNModel(nn.Module):
             self.slot_proj = nn.Linear(d_model, d_model)
 
     def slot_write(self, key_id, value_id):
-        v = self.slot_proj(self.embed(torch.tensor([value_id], device=self.slot_table.device)))
-        self.slot_table[key_id] = v.squeeze(0)
+        with torch.no_grad():
+            v = self.slot_proj(self.embed(torch.tensor([value_id], device=self.slot_table.device)))
+            self.slot_table[key_id] = v.squeeze(0)
 
     def forward(self, x, return_states=False):
         bsz, seq_len = x.shape
@@ -40,11 +41,9 @@ class TemporalSNNModel(nn.Module):
         logits = []
         states = [h.clone()] if return_states else None
         for t in range(seq_len):
-            if t < seq_len - 1:
-                h = self.cell(h, emb[:, t, :], step=t)
-            else:
-                h_in = h + self.slot_table[x[:, -1]] if self.n_slots > 0 else h
-                h = self.cell(h_in, emb[:, t, :], step=t)
+            h_in = h + self.slot_table[x[:, t]] if self.n_slots > 0 else h
+            h = self.cell(h_in, emb[:, t, :], step=t)
+            if t == seq_len - 1:
                 pat = self.cell.patterns.unsqueeze(0).expand(bsz, -1, -1) if self.cell.patterns is not None else ((self.cell.U @ self.cell.V).unsqueeze(0).expand(bsz, -1, -1))
                 xi = h.unsqueeze(1)
                 scores = xi @ pat.transpose(1, 2) * self.cell.beta_t[0]

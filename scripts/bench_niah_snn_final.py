@@ -23,7 +23,9 @@ print(f"paragraphs: {len(paras)}",flush=True)
 
 def build_model():
     m=TemporalSNNModel(V,d_model=DM,n_patterns=NP,beta=0.5,attract_every=2,error_threshold=1.0,hebbian_lr=0.0,inhibition_threshold=0.0).to(device)
-    m.load_state_dict(torch.load("checkpoints/cann_snn15m_v2_ep12.pt",map_location=device,weights_only=False)["model"],strict=False)
+    ckpt = torch.load("checkpoints/cann_snn15m_v2_slot_ep13.pt",map_location=device,weights_only=False)
+    sd = ckpt["model"] if "model" in ckpt else ckpt
+    m.load_state_dict(sd, strict=False)
     m.slot_proj=torch.nn.Linear(DM,DM).to(device); m.slot_proj.weight.data.normal_(0,0.01); m.slot_proj.bias.data.zero_()
     return m
 
