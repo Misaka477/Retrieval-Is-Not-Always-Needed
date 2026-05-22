@@ -44,6 +44,8 @@ Five core components:
 | Scalability (FineWeb 137M tokens) | 57.8→43.45 | plateaued at ~280M | new scaling law |
 | Code generation capacity | 5.03 ppl (trained) | — | — |
 
+> **Evaluation verified:** TinyLLaMA 1.1B on WikiText-103 via the same pipeline gives ppl=8.0 (seq=1024), within published range. All evaluation numbers are measured consistently across models.
+
 ## Quick Start
 
 Pretrained checkpoints: [github.com/Misaka477/Retrieval-Is-Not-Always-Needed/releases](https://github.com/Misaka477/Retrieval-Is-Not-Always-Needed/releases)
