@@ -34,6 +34,8 @@ Five core components:
 
 **Memory cost:** RINA slot is independent of sequence length. Transformer 70B with 1M context requires KV cache ≈ **2.6 TB**; RINA slot requires only **16 GB**, regardless of context length.
 
+**Slot limitation (honest):** The current slot mechanism does not autonomously decide what to store or retrieve. It requires manual `slot_write()` calls and only injects at the last position. It cannot independently track conversation context. This is a known limitation — autonomous content-addressable memory remains future work.
+
 ### Cross-distribution results
 
 | Task | RINA 15M | GPT-2 15M | Improvement |
@@ -210,6 +212,8 @@ A(h̃) = h̃ + α·(S(h̃·Pᵀ)·P − h̃)   ← attractor
 多 key NIAH（gap=128, 随机位置）：**RINA 100%** vs GPT-2 36%（−47%）。
 
 **记忆显存：** RINA slot 不随序列长度增长。Transformer 70B 在 1M 上下文时 KV cache ≈ **2.6 TB**；RINA slot 仅 **16 GB**，与上下文长度无关。
+
+**Slot 局限性（诚实说明）：** 当前 slot 不会自主判断该存什么、该查什么。需要外部手动调用 `slot_write()`，且仅在最后一位自动注入。无法独立追踪对话上下文。自主内容寻址记忆是未解决的问题。
 
 ### 跨分布结果
 
