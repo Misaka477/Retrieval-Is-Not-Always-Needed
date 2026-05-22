@@ -15,6 +15,7 @@ ckpt_sources = [
     ("FineWeb ep1", "checkpoints/fineweb_ep1.pt"),
     ("FineWeb ep2", "checkpoints/fineweb_ep2.pt"),
     ("FineWeb ep3 (seed=43)", "checkpoints/fineweb_resume.pt"),
+    ("Code-seq256 (on FineWeb)", "checkpoints/code_seq256_resume.pt"),
 ]
 
 # Build model once, reload weights per checkpoint

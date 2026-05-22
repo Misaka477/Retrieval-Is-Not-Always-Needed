@@ -112,6 +112,9 @@ def eval_model(model, name, gap, steps=300):
             loss.backward()
         opt.step()
 
+        if best >= 1.0:
+            break
+
         if step % 10 == 9:
             model.eval()
             with torch.no_grad():
@@ -134,7 +137,7 @@ def eval_model(model, name, gap, steps=300):
 
 print("\n  gap    SNN+slot")
 print("  ────────────────")
-for gap in [8, 16, 32, 64, 128]:
+for gap in [64, 128]:
     best = eval_model(model, "SNN", gap)
     print(f"  {gap:3d}     {best*100:.0f}%")
 print()

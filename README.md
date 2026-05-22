@@ -32,8 +32,6 @@ Five core components:
 | GPT-2 | 34.8 | ❌ O(T²) | ❌ | ❌ |
 | SSM-only (ablation) | 34.7 | ✅ | ⚠️ | ❌ |
 
-Multi-key NIAH (gap=128, random positions): **RINA 100%** vs GPT-2 36% (−47%).
-
 **Memory cost:** RINA slot is independent of sequence length. Transformer 70B with 1M context requires KV cache ≈ **2.6 TB**; RINA slot requires only **16 GB**, regardless of context length.
 
 ### Cross-distribution results
@@ -42,12 +40,9 @@ Multi-key NIAH (gap=128, random positions): **RINA 100%** vs GPT-2 36% (−47%).
 |:-----|:---------|:----------|:------------|
 | WikiText-103 ppl | 33.3 | 34.8 | +5% |
 | Code zero-shot (StarCoder) | **65.80** | **14,432** | **219×** |
-| Multi-key NIAH | **100%** | 36% | +178% |
 | seq=512 inference ppl | **36.0** | 104.0 | −65% |
 | Scalability (FineWeb 137M tokens) | 57.8→43.45 | plateaued at ~280M | new scaling law |
 | Code generation capacity | 5.03 ppl (trained) | — | — |
-
-**Real-text single-key NIAH:** 41% (code-trained) vs 22% (text-only) — code training improves slot trust.
 
 ## Quick Start
 
@@ -87,14 +82,10 @@ Training produces `checkpoints/cann_snn15m_v2_final.pt`.
 python scripts/generate.py       # requires trained checkpoint
 ```
 
-## NIAH Benchmark
+## Seq-Len Benchmark
 
 ```bash
-# Toy NIAH: quick verification
-python scripts/bench_niah_snn_slot.py
-
-# Real-text + extreme + multi-key NIAH
-python scripts/bench_niah_snn_final.py
+python scripts/bench_seqlen.py       # sequence-length benchmark
 ```
 
 ## V1 Baselines
@@ -223,7 +214,6 @@ A(h̃) = h̃ + α·(S(h̃·Pᵀ)·P − h̃)   ← attractor
 | 评测 | RINA 15M | GPT-2 15M | 差距 |
 |:-----|:---------|:----------|:------|
 | 代码零样本迁移 (StarCoder) | **65.80** | **14,432** | **219×** |
-| 多 key NIAH | **100%** | 36% | +178% |
 | seq=512 推理 ppl | **36.0** | 104.0 | −65% |
 | FineWeb 137M tokens 缩放 | 57.8→43.45 | ~280M 平台 | 缩放不收敛 |
 | 代码生成上限 | 5.03 ppl (已训) | — | — |
