@@ -23,7 +23,7 @@ V_tok = tok.get_vocab_size()
 print(f"Tokenizer: vocab={V_tok}", flush=True)
 
 # ── Load SNN model ──
-CKPT = "checkpoints/cann_snn15m_v2_slot_ep13.pt"
+CKPT = "checkpoints/code_seq256_resume.pt"
 ckpt = torch.load(CKPT, map_location=device, weights_only=False)
 model = TemporalSNNModel(V_tok, d_model=DM, n_patterns=NP, beta=0.5, attract_every=2,
                           error_threshold=1.0, hebbian_lr=0.0,
