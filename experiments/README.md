@@ -2,6 +2,15 @@
 
 每个实验验证架构的一个具体能力。按优先级排列。
 
+## 一键复现
+
+```bash
+pip install -r requirements.txt
+python reproduce_experiments.py
+```
+
+需要下载 checkpoint 到 `checkpoints/`（参见 [GitHub Releases](https://github.com/Misaka477/Retrieval-Is-Not-Always-Needed/releases)）。
+
 ## 1. 参数效率（核心结果）
 
 验证 RINA 15M 在 WikiText-103 上的 ppl 与更大模型的差距。
