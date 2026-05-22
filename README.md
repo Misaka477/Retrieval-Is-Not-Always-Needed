@@ -23,7 +23,7 @@ Five core components:
 4. **Hebbian plasticity** — online learning, winner pattern pulled toward state
 5. **Lateral inhibition** — repels neighbors to prevent pattern collapse
 
-## Key Results (15.3M on WikiText-103)
+## Key Results (15.3M)
 
 | Model | ppl | O(T) inference | Content-addressable memory | Online learning |
 |-------|-----|---------------|---------------------------|-----------------|
@@ -34,11 +34,24 @@ Five core components:
 
 Multi-key NIAH (gap=128, random positions): **RINA 100%** vs GPT-2 36% (−47%).
 
-**Memory cost:** RINA slot is independent of sequence length. Transformer 70B with 1M context requires KV cache ≈ **2.6 TB**; RINA slot requires only **16 GB**, regardless of context length. Content-addressable memory fundamentally eliminates the attention scaling problem.
+**Memory cost:** RINA slot is independent of sequence length. Transformer 70B with 1M context requires KV cache ≈ **2.6 TB**; RINA slot requires only **16 GB**, regardless of context length.
+
+### Cross-distribution results
+
+| Task | RINA 15M | GPT-2 15M | Improvement |
+|:-----|:---------|:----------|:------------|
+| WikiText-103 ppl | 33.3 | 34.8 | +5% |
+| Code zero-shot (StarCoder) | **65.80** | **14,432** | **219×** |
+| Multi-key NIAH | **100%** | 36% | +178% |
+| seq=512 inference ppl | **36.0** | 104.0 | −65% |
+| Scalability (FineWeb 137M tokens) | 57.8→43.45 | plateaued at ~280M | new scaling law |
+| Code generation capacity | 5.03 ppl (trained) | — | — |
+
+**Real-text single-key NIAH:** 41% (code-trained) vs 22% (text-only) — code training improves slot trust.
 
 ## Quick Start
 
-Pretrained checkpoints: [github.com/Misaka477/Retrieval-Is-Not-Always-Needed/releases/tag/v0.1.0](https://github.com/Misaka477/Retrieval-Is-Not-Always-Needed/releases/tag/v0.1.0)
+Pretrained checkpoints: [github.com/Misaka477/Retrieval-Is-Not-Always-Needed/releases](https://github.com/Misaka477/Retrieval-Is-Not-Always-Needed/releases)
 
 ```bash
 git clone ...
@@ -89,8 +102,6 @@ python scripts/bench_niah_snn_final.py
 > V1 (CANN-SSM) is RINA's predecessor — SSM gate + attractor + slot without temporal gating or Hebbian plasticity. Kept for direct ablation and comparison.
 
 ```bash
-
-```bash
 python scripts/train_cann_15m.py     # V1 CANN-SSM → ppl 34.5
 python scripts/train_ablation.py     # SSM-only  → ppl 34.7
 python scripts/train_gpt2_15m.py     # GPT-2     → ppl 34.8
@@ -132,17 +143,18 @@ scripts/
   warm_restart.py           — LR-reset continuation (34.5 → 34.7)
   generate.py               — autoregressive generation demo
   quick_test.py             — 10s smoke test (no external data)
+  train_fineweb.py          — FineWeb scaling law experiment
+  train_code.py             — StarCoder code training
+  train_code_seq128.py      — progressive seq=128 code training
+  train_code_seq256.py      — progressive seq=256 code training
   train_cann_15m.py         — V1 baseline
   train_ablation.py         — SSM-only ablation
   train_gpt2_15m.py         — GPT-2 baseline
   bench_seqlen.py           — sequence-length benchmark
-  bench_niah_slot.py        — V1 NIAH toy
-  bench_niah_realtext.py    — V1 NIAH real-text
-  bench_niah_extreme.py     — V1 NIAH random position
-  bench_niah_multikey.py    — V1 NIAH multi-key
-  bench_niah_snn_slot.py    — SNN v2 NIAH toy
-  bench_niah_snn_realtext.py — SNN v2 NIAH real-text
-  bench_niah_snn_final.py   — SNN v2 NIAH extreme + multi-key
+  bench_niah_*.py           — NIAH benchmarks (V1 and SNN v2)
+  bench_code_ppl.py         — cross-distribution code ppl comparison (--seq, --th)
+  bench_ppl_fineweb.py      — FineWeb distribution validation
+  bench_wikitext_ppl.py     — cross-checkpoint WikiText comparison
   train_multimodal.py       — multi-modal proof-of-concept
 
 config/
@@ -206,9 +218,19 @@ A(h̃) = h̃ + α·(S(h̃·Pᵀ)·P − h̃)   ← attractor
 
 **记忆显存：** RINA slot 不随序列长度增长。Transformer 70B 在 1M 上下文时 KV cache ≈ **2.6 TB**；RINA slot 仅 **16 GB**，与上下文长度无关。
 
+### 跨分布结果
+
+| 评测 | RINA 15M | GPT-2 15M | 差距 |
+|:-----|:---------|:----------|:------|
+| 代码零样本迁移 (StarCoder) | **65.80** | **14,432** | **219×** |
+| 多 key NIAH | **100%** | 36% | +178% |
+| seq=512 推理 ppl | **36.0** | 104.0 | −65% |
+| FineWeb 137M tokens 缩放 | 57.8→43.45 | ~280M 平台 | 缩放不收敛 |
+| 代码生成上限 | 5.03 ppl (已训) | — | — |
+
 ## 快速开始
 
-预训练权重：[github.com/Misaka477/Retrieval-Is-Not-Always-Needed/releases/tag/v0.1.0](https://github.com/Misaka477/Retrieval-Is-Not-Always-Needed/releases/tag/v0.1.0)
+预训练权重：[github.com/Misaka477/Retrieval-Is-Not-Always-Needed/releases](https://github.com/Misaka477/Retrieval-Is-Not-Always-Needed/releases)
 
 ```
 reproduce.bat                    # 一键：装依赖 + 冒烟测试
