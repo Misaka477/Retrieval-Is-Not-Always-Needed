@@ -65,9 +65,20 @@ print("Building Temporal SNN model with slot...", flush=True)
 model = TemporalSNNModel(V, d_model=DM, n_patterns=NP, beta=0.5,
                           attract_every=AE, error_threshold=ERROR_TH,
                           hebbian_lr=HEBB_LR, inhibition_threshold=INHIB_TH,
-                          n_slots=N_SLOTS).to(device)
+                           n_slots=N_SLOTS).to(device)
 n_params = sum(p.numel() for p in model.parameters())
 print(f"  params: {n_params:,} ({n_params/1e6:.1f}M)", flush=True)
+
+# Try torch.compile (PyTorch 2.3+, requires Linux+triton)
+try:
+    model.cell.forward = torch.compile(model.cell.forward, mode="reduce-overhead",
+                                       disable=os.name=="nt")
+    if os.name != "nt":
+        print(f"  torch.compile: ON (reduce-overhead)", flush=True)
+    else:
+        print(f"  torch.compile: OFF (Windows, no triton)", flush=True)
+except Exception:
+    print(f"  torch.compile: OFF (fallback to eager)", flush=True)
 
 opt = torch.optim.AdamW(model.parameters(), lr=LR)
 scaler = torch.amp.GradScaler()
