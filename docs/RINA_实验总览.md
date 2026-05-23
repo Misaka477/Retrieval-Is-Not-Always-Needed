@@ -332,7 +332,7 @@ mohe_large（FW+StarCoder+OpenWebMath 200M, 正在跑）
 
 ### K3: N-Expert Fused Forward
 
-将 MoHE 每步 4 个专家的计算（原 K1+K2 × 4 = 8 次 launch）融合为 **1 次 launch**。
+将 MoHE 每步 4 个专家的计算（原 K1+K2 × 4 = 8 次 launch）融合为 **1 次 launch**。K3 完全通用：`ne`（专家数）、`dm`（维度）、`bs`（batch size）均为运行时参数，无硬编码。唯一硬件约束是 `2 × dm × sizeof(float) ≤ 48 KB`（shared memory 上限），即 `dm ≤ 6144`，当前 `dm=256` 绰绰有余。
 
 ### K4: Batched Head Projection
 

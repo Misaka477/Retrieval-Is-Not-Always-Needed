@@ -196,7 +196,7 @@ MoHE: 4 experts, winner-take-all Hebbian + loser inhibition
 
 ### K3 GPU Kernel Optimization
 
-The per-expert forward computation (K1+K2) was fused into a single **K3 kernel** — 1 CUDA launch vs 8 per step:
+The per-expert forward computation (K1+K2) was fused into a single **K3 kernel** — 1 CUDA launch vs 8 per step. K3 is fully general: `ne` (expert count), `dm` (dimension), `bs` (batch size) are all runtime parameters — zero hardcoded constants. The only hardware constraint is `2 × dm × sizeof(float) ≤ 48 KB` (shared memory limit), giving `dm ≤ 6144` — well above the current `dm=256`.
 
 | Version | launches/step | Speed-up |
 |---------|--------------|----------|
@@ -328,7 +328,7 @@ MoHE: 4 专家，赢家通吃 Hebbian + 输家抑制
 
 ### K3 GPU 算子优化
 
-将每步 4 专家的前向计算（原 K1+K2 × 4 = 8 次 launch）融合为 **1 次 launch**：
+将每步 4 专家的前向计算（原 K1+K2 × 4 = 8 次 launch）融合为 **1 次 launch**。K3 完全通用：`ne`（专家数）、`dm`（维度）、`bs`（batch size）均为运行时参数，无硬编码。唯一硬件约束是 `2 × dm × sizeof(float) ≤ 48 KB`（shared memory 上限），即 `dm ≤ 6144`，当前 `dm=256` 绰绰有余。
 
 | 版本 | launches/step | 加速比 |
 |------|--------------|--------|

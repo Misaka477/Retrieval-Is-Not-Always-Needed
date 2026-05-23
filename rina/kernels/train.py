@@ -36,47 +36,68 @@ __global__ void k3_fwd(float* h_out, float* h_fast_out,
     const float* nw, const float* nb,
     const float* sw, const float* sb,
     int bs, int dm, int ne){
-    int b=blockIdx.x,d=threadIdx.x;
-    if(b>=bs||d>=dm)return;
+    int b=blockIdx.x,tid=threadIdx.x;
+    if(b>=bs)return;
     extern __shared__ float s[];
-    float* s_hf=s; float* s_fld=s+dm;
-    float h_val=h[b*dm+d];
+    float* s_hf=s;              // [0..dm) h_fast (persistent)
+    float* s_field=s+dm;        // [dm..2*dm) field/fm_out/normed
+    float* s_red=s+2*dm;        // [2*dm..2*dm+256) reduction temp
     for(int e=0;e<ne;e++){
         int eb=e*dm, e2d=e*2*dm*dm, ed=e*dm*dm;
-        float sa=gb[eb+d],sbv=fb[eb+d],xp=pb[eb+d];
-        for(int k=0;k<dm;k++){
-            float hk=h[b*dm+k],xk=x[b*dm+k];
-            sa=__fma_rn(hk,gw[e2d+d*2*dm+k],sa);
-            sa=__fma_rn(xk,gw[e2d+d*2*dm+dm+k],sa);
-            sbv=__fma_rn(hk,fw[e2d+d*2*dm+k],sbv);
-            sbv=__fma_rn(xk,fw[e2d+d*2*dm+dm+k],sbv);
-            xp=__fma_rn(xk,pw[ed+d*dm+k],xp);}
-        float sig_a=__frcp_rn(1.f+expf(-fminf(fmaxf(sa,-30.f),30.f)));
-        float sig_b=__frcp_rn(1.f+expf(-fminf(fmaxf(sbv,-30.f),30.f)));
-        int ebo=e*bs*dm+b*dm;
-        sa_a[ebo+d]=sig_a; sa_b[ebo+d]=sig_b; sa_xp[ebo+d]=xp;
-        float hf=__fma_rn(sig_b,xp,sig_a*h_val);
-        s_hf[d]=hf; __syncthreads();
-        float fd=0;
-        for(int j=0;j<dm;j++)fd=__fma_rn(s_hf[j],P[ed+j*dm+d],fd);
-        s_fld[d]=fd; sa_field[ebo+d]=fd; __syncthreads();
-        float fm_val=fmb[eb+d];
-        for(int j=0;j<dm;j++)fm_val=__fma_rn(s_fld[j],fmw[ed+d*dm+j],fm_val);
-        sa_fm_out[ebo+d]=fm_val;
-        s_hf[d]=fm_val; __syncthreads();
-        float mn=0; for(int j=0;j<dm;j++)mn+=s_hf[j]; mn/=dm;
-        float vr=0; for(int j=0;j<dm;j++){float dv=s_hf[j]-mn;vr+=dv*dv;}vr/=dm;
-        float fn=(fm_val-mn)*__frsqrt_rn(vr+1e-5f)*nw[eb+d]+nb[eb+d];
-        sa_normed[ebo+d]=fn;
-        float sg_val=sb[e];
-        if(d==0){for(int k=0;k<dm;k++){
-            sg_val=__fma_rn(h[b*dm+k],sw[e*2*dm+k],sg_val);
-            sg_val=__fma_rn(x[b*dm+k],sw[e*2*dm+dm+k],sg_val);}}
-        s_fld[0]=sg_val; __syncthreads(); sg_val=s_fld[0];
-        float gate=__frcp_rn(1.f+expf(-fminf(fmaxf(sg_val,-30.f),30.f)));
-        if(d==0) sa_gate[e*bs+b]=gate;
-        float h_out_val=__fma_rn(gate*0.1f,fn,hf);
-        h_out[ebo+d]=h_out_val; h_fast_out[ebo+d]=hf;
+        // 1. gate_a + gate_b + proj_in -> h_fast (__fma_rn)
+        for(int d=tid;d<dm;d+=blockDim.x){
+            float sa=gb[eb+d],sbv=fb[eb+d],xp=pb[eb+d];
+            for(int k=0;k<dm;k++){
+                float hk=h[b*dm+k],xk=x[b*dm+k];
+                sa=__fma_rn(hk,gw[e2d+d*2*dm+k],sa);
+                sa=__fma_rn(xk,gw[e2d+d*2*dm+dm+k],sa);
+                sbv=__fma_rn(hk,fw[e2d+d*2*dm+k],sbv);
+                sbv=__fma_rn(xk,fw[e2d+d*2*dm+dm+k],sbv);
+                xp=__fma_rn(xk,pw[ed+d*dm+k],xp);}
+            float sig_a=__frcp_rn(1.f+expf(-fminf(fmaxf(sa,-30.f),30.f)));
+            float sig_b=__frcp_rn(1.f+expf(-fminf(fmaxf(sbv,-30.f),30.f)));
+            int ebo=e*bs*dm+b*dm+d;
+            sa_a[ebo]=sig_a; sa_b[ebo]=sig_b; sa_xp[ebo]=xp;
+            s_hf[d]=__fma_rn(sig_b,xp,sig_a*h[b*dm+d]);}
+        __syncthreads();
+        // 2. field = h_fast @ P (__fma_rn)
+        for(int d=tid;d<dm;d+=blockDim.x){
+            float fd=0;
+            for(int j=0;j<dm;j++)fd=__fma_rn(s_hf[j],P[ed+j*dm+d],fd);
+            s_field[d]=fd; sa_field[e*bs*dm+b*dm+d]=fd;}
+        __syncthreads();
+        // 3. field_mix: field @ fmw.T + fmb
+        for(int d=tid;d<dm;d+=blockDim.x){
+            float fm_val=fmb[eb+d];
+            for(int j=0;j<dm;j++)fm_val=__fma_rn(s_field[j],fmw[ed+d*dm+j],fm_val);
+            s_field[d]=fm_val; sa_fm_out[e*bs*dm+b*dm+d]=fm_val;}
+        __syncthreads();
+        // 4. layer_norm (tree reduce into s_red, preserves s_hf and s_field)
+        float mn_part=0; for(int d=tid;d<dm;d+=blockDim.x)mn_part+=s_field[d];
+        s_red[tid]=mn_part;__syncthreads();
+        for(int st=blockDim.x/2;st>0;st>>=1){if(tid<st)s_red[tid]+=s_red[tid+st];__syncthreads();}
+        float mn=s_red[0]/dm;
+        float vr_part=0; for(int d=tid;d<dm;d+=blockDim.x){float dv=s_field[d]-mn;vr_part+=dv*dv;}
+        s_red[tid]=vr_part;__syncthreads();
+        for(int st=blockDim.x/2;st>0;st>>=1){if(tid<st)s_red[tid]+=s_red[tid+st];__syncthreads();}
+        float rstd=__frsqrt_rn(s_red[0]/dm+1e-5f);
+        for(int d=tid;d<dm;d+=blockDim.x){
+            float fn=(s_field[d]-mn)*rstd*nw[eb+d]+nb[eb+d];
+            s_field[d]=fn; sa_normed[e*bs*dm+b*dm+d]=fn;}
+        __syncthreads();
+        // 5. slow_gate (partial sum per thread, tree reduce into s_red)
+        float sg_part=sb[e];
+        for(int d=tid;d<dm;d+=blockDim.x)
+            sg_part+=h[b*dm+d]*sw[e*2*dm+d]+x[b*dm+d]*sw[e*2*dm+dm+d];
+        s_red[tid]=sg_part;__syncthreads();
+        for(int st=blockDim.x/2;st>0;st>>=1){if(tid<st)s_red[tid]+=s_red[tid+st];__syncthreads();}
+        float gate=__frcp_rn(1.f+expf(-fminf(fmaxf(s_red[0],-30.f),30.f)));
+        if(tid==0) sa_gate[e*bs+b]=gate;
+        // 6. h_out = h_fast + gate * normed_field * 0.1
+        for(int d=tid;d<dm;d+=blockDim.x){
+            int ebo=e*bs*dm+b*dm+d;
+            h_out[ebo]=__fma_rn(gate*0.1f,s_field[d],s_hf[d]);
+            h_fast_out[ebo]=s_hf[d];}
         __syncthreads();}}
 void l3_fwd(float* h_out,float* h_fast_out,
     float* sa_a,float* sa_b,float* sa_xp,
@@ -90,7 +111,7 @@ void l3_fwd(float* h_out,float* h_fast_out,
     const float* nw,const float* nb,
     const float* sw,const float* sb,
     int bs,int dm,int ne){
-    k3_fwd<<<bs,dm,2*dm*sizeof(float)>>>(h_out,h_fast_out,
+    k3_fwd<<<bs,256,(2*dm+256)*sizeof(float)>>>(h_out,h_fast_out,
         sa_a,sa_b,sa_xp,sa_field,sa_fm_out,sa_normed,sa_gate,
         h,x,gw,gb,fw,fb,pw,pb,P,fmw,fmb,nw,nb,sw,sb,bs,dm,ne);}
 """
