@@ -304,10 +304,11 @@ class FusedExpertFunction(torch.autograd.Function):
         gs = dict(grad_logit_a=g_la.detach(), grad_logit_b=g_lb.detach(),
                   grad_xp_out=g_xo.detach(), grad_fm_out=g_fo.detach(),
                   grad_logit_s=g_ls.detach(), grad_nw=g_nw, grad_nb=g_nb,
-                  combined_ne=cn, x_emb=x_emb, sa_field=s['sa_field'])
+                  combined_ne=cn.detach(), x_emb=x_emb.detach(), sa_field=s['sa_field'].detach())
         if FusedExpertFunction._last_grads is None:
-            gs.update(gw=gw, gb=gb, fw=fw, fb=fb, pw=pw, pb=pb, fmw=fmw, fmb=fmb,
-                      nw=nw, nb=nb, sw=sw, sb=sb)
+            gs.update(gw=gw.detach(), gb=gb.detach(), fw=fw.detach(), fb=fb.detach(),
+                      pw=pw.detach(), pb=pb.detach(), fmw=fmw.detach(), fmb=fmb.detach(),
+                      nw=nw.detach(), nb=nb.detach(), sw=sw.detach(), sb=sb.detach())
             FusedExpertFunction._last_grads = gs
         else:
             for k in ['grad_logit_a', 'grad_logit_b', 'grad_xp_out', 'grad_fm_out',
