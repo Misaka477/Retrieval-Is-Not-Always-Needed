@@ -329,3 +329,53 @@ mohe_large（FW+StarCoder+OpenWebMath 200M, 正在跑）
 ### 创新定位
 
 MoHE 独占的五者交集：MoE + 推理时 Hebbian + 线性可 scan + Depth-of-Thought（隐空间迭代） + 赢家通吃分化。现有工作（MoRAM、HEBATRON、ASMG）各占 1-2 项，无全部。
+
+---
+
+## 6. v3 MoHE：门控双记忆线性递回（2026-05-23）
+
+### 根因分析
+
+v2 softmax attractor 的根本矛盾：**basin 收敛要求状态静止，SSM 递回要求状态流动——两者互斥。** 这是 v2 训练慢（非线性 → 不能 associative scan）、生成重复（basin 锁死 h）的根因。
+
+### 架构：线性场 + 双记忆 self-play
+
+```python
+P = patterns.T @ patterns           # [dm, dm]，Hebbian 演化的场张量
+h_t = (a + gate_t·P)·h_{t-1} + b·x_t   # 全线性递推
+```
+
+去除 softmax，attractor 替换为线性联想场。快记忆（SSM gate）+ 慢记忆（场 P）目标不一致 → 自然形成自我博弈。
+
+### 演化路径
+
+```
+v2 softmax attractor → 训练慢、生成重复
+  ↓ 根因：basin 收敛与 SSM 递回冲突
+线性场 → 可 scan、保留慢记忆
+  ↓ 自然延伸
+MoHE（赢家通吃 Hebbian MoE）
+  ↓ LayerNorm consolidation + 专家惯性 + GPT-2 50K 词表
+mohe_large（FW+StarCoder+OpenWebMath 200M, 正在跑）
+```
+
+### 验证结果
+
+| 实验 | 配置 | 数据 | ppL | 速度 |
+|:-----|:-----|:-----|:----|:-----|
+| 单层线性场 | dm=256, 2.8M | WikiText 3M | **93.4** | 6 it/s |
+| MoHE depth=1 | 28M, 4 expert | WikiText 3M | **163.5** | 2.5 it/s |
+| MoHE depth=2 | 28M, 4 expert | WikiText 3M | **133.3** | 1.6 it/s |
+| MoHE 200M（跑中） | 28M, 4 expert | FW+SC+Math 200M | **~1900** | 1.4 it/s |
+
+### 关键技术决策
+
+- **去 softmax → 去 slot → 去 NIAH → 去 slot_proj → 去 write_net**（单向清理）
+- **Consolidation_norm** 替代 `÷√4`（自适应专家融合）
+- **Head init: N(0,0.001) + bias=-10.8**（50K 词表稳定）
+- **NaN 时 scheduler.step() 必执行**（warmup 不卡死）
+- **赢家通吃 Hebbian + 输家抑制**（专家分化保障）
+
+### 创新定位
+
+MoHE 独占的五者交集：MoE + 推理时 Hebbian + 线性可 scan + Depth-of-Thought（隐空间迭代） + 赢家通吃分化。现有工作（MoRAM、HEBATRON、ASMG）各占 1-2 项，无全部。
