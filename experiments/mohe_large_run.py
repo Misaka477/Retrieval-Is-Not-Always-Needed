@@ -133,6 +133,7 @@ for ep in range(start_ep, EPOCHS + 1):
         model.finish_training_step()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step(); scheduler.step()
+        torch.cuda.empty_cache()
         total_loss += loss.item()
         if bi % 10 == 0:
             alloc_mb = torch.cuda.memory_allocated() / 1024**2

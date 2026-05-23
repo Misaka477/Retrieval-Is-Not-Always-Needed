@@ -300,27 +300,16 @@ class FusedExpertFunction(torch.autograd.Function):
         gxp = torch.einsum('nbd,ndk->nbk', g_xo, pw)
         grad_h = (g_hc.sum(0) + gca[:,:,:dm].sum(0) + gcb[:,:,:dm].sum(0) + gcs[:,:,:dm].sum(0))
         grad_x = (gca[:,:,dm:].sum(0) + gcb[:,:,dm:].sum(0) + gcs[:,:,dm:].sum(0) + gxp.sum(0))
-
-        gw_d = gw.detach(); gb_d = gb.detach(); fw_d = fw.detach(); fb_d = fb.detach()
-        pw_d = pw.detach(); pb_d = pb.detach()
-        fmw_d = fmw.detach(); fmb_d = fmb.detach()
-        nw_d = nw.detach(); nb_d = nb.detach(); sw_d = sw.detach(); sb_d = sb.detach()
-        cn_d = cn.detach(); x_d = x_emb.detach(); sf_d = s['sa_field'].detach()
-        gls_d = g_ls.detach(); gfo_d = g_fo.detach(); gxa_d = g_xo.detach()
-
-        del h, x_emb, combined, cn, gca, gcb, gcs, gxp
-        del s; ctx._saved = None
-        for t in ctx.ne, ctx.bs, ctx.dm: pass
-        ctx.ne = ctx.bs = ctx.dm = None
+        torch.cuda.synchronize()
 
         gs = dict(grad_logit_a=g_la.detach(), grad_logit_b=g_lb.detach(),
-                  grad_xp_out=gxa_d, grad_fm_out=gfo_d,
-                  grad_logit_s=gls_d, grad_nw=g_nw, grad_nb=g_nb,
-                  combined_ne=cn_d, x_emb=x_d, sa_field=sf_d)
+                  grad_xp_out=g_xo.detach(), grad_fm_out=g_fo.detach(),
+                  grad_logit_s=g_ls.detach(), grad_nw=g_nw, grad_nb=g_nb,
+                  combined_ne=cn.detach(), x_emb=x_emb.detach(), sa_field=s['sa_field'].detach())
         if FusedExpertFunction._last_grads is None:
-            gs.update(gw=gw_d, gb=gb_d, fw=fw_d, fb=fb_d,
-                      pw=pw_d, pb=pb_d, fmw=fmw_d, fmb=fmb_d,
-                      nw=nw_d, nb=nb_d, sw=sw_d, sb=sb_d)
+            gs.update(gw=gw.detach(), gb=gb.detach(), fw=fw.detach(), fb=fb.detach(),
+                      pw=pw.detach(), pb=pb.detach(), fmw=fmw.detach(), fmb=fmb.detach(),
+                      nw=nw.detach(), nb=nb.detach(), sw=sw.detach(), sb=sb.detach())
             FusedExpertFunction._last_grads = gs
         else:
             for k in ['grad_logit_a', 'grad_logit_b', 'grad_xp_out', 'grad_fm_out',
@@ -349,8 +338,7 @@ def compute_param_grads():
     grads['norm.bias'] = s['grad_nb']
     grads['slow_gate.weight'] = torch.einsum('nb,nbk->nk', s['grad_logit_s'], s['combined_ne'])
     grads['slow_gate.bias'] = s['grad_logit_s'].sum(1)
-    del s; FusedExpertFunction._last_grads = None
-    import gc; gc.collect()
+    FusedExpertFunction._last_grads = None
     return grads
 
 
