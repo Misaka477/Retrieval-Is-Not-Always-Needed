@@ -129,6 +129,7 @@ for ep in range(start_ep, EPOCHS + 1):
             scheduler.step()
             continue
         loss.backward()
+        model.finish_training_step()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step(); scheduler.step()
         total_loss += loss.item()
