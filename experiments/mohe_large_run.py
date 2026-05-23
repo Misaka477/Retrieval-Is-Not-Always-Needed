@@ -134,10 +134,6 @@ for ep in range(start_ep, EPOCHS + 1):
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step(); scheduler.step()
         total_loss += loss.item()
-        if bi % 50 == 0:
-            alloc = torch.cuda.memory_allocated() / 1024**2
-            reserved = torch.cuda.memory_reserved() / 1024**2
-            print(f"\n[step {bi}] alloc={alloc:.0f}MB reserved={reserved:.0f}MB", flush=True)
         if bi % 200 == 199:
             ppl = torch.exp(torch.tensor(total_loss / (bi + 1))).item()
             lr_now = opt.param_groups[0]['lr']
