@@ -328,13 +328,17 @@ mohe_large（FW+StarCoder+OpenWebMath 200M, 正在跑）
 
 ---
 
-## 7. K3 GPU Kernel 优化：N-Expert Fused 算子（2026-05-24）
+## 7. K3/K4 GPU Kernel 优化（2026-05-24）
 
-### 目标
+### K3: N-Expert Fused Forward
 
-将 MoHE 每步 4 个专家的计算（原 8 次 kernel launch: K1+K2 × 4）融合为 1 次 launch。
+将 MoHE 每步 4 个专家的计算（原 K1+K2 × 4 = 8 次 launch）融合为 **1 次 launch**。
 
-### 最终方案：混合加速
+### K4: Batched Head Projection
+
+将 head projection 移出并行循环，batch 为一次大 GEMM（M 从 8 提升到 512），推理 **4.2 it/s**（+68%）。
+
+### 混合加速方案
 
 | 阶段 | 方案 | Launch 数 |
 |------|------|-----------|
@@ -342,13 +346,13 @@ mohe_large（FW+StarCoder+OpenWebMath 200M, 正在跑）
 | **Backward (input grads)** | Python autograd（保存中间值） | N/A |
 | **Backward (param grads)** | `compute_param_grads()` + `apply_param_grads()` | N/A |
 
-纯 CUDA backward kernel 存在 shared memory 竞争条件无法解决，改用 Python 实现 backward（使用 K3 forward 保存的中间激活值），精度误差 < 1e-6。
+纯 CUDA backward kernel 存在 shared memory 竞争条件无法解决，改用 Python 实现 backward。Associative scan 经验证在 MoHE 上无加速价值（gate 计算依赖 h_{t-1} 无法并行化，且 K3 已足够融合）。
 
-### 关键文件
+### 清理
 
-- `kernels.py` — K3 forward kernel（通用 N-expert fused，已集成到推理路径）
-- `kernels_train.py` — `FusedExpertFunction` autograd Function + 参数梯度计算
-- `rina/mohe.py` — 集成训练路径，新增 `finish_training_step()` 方法
+- K1+K2 死代码已删除（K3 ne=1 即可实现单专家，比 K1+K2 还少一次 launch）
+- `kernels.py` → `rina/kernels/__init__.py`
+- `kernels_train.py` → `rina/kernels/train.py`
 
 ### 精度验证
 
@@ -356,29 +360,25 @@ mohe_large（FW+StarCoder+OpenWebMath 200M, 正在跑）
 |------|------|-----------|
 | Forward 精度 | DM=64/128/256, NE=2/4 | 8.34e-07 |
 | Gradient 精度 | DM=64/128, NE=2/4 | 9.54e-07 |
-| 端到端训练循环 | DM=256, NE=4, 3 step | 梯度非零，正常衰减 |
+| Batched head vs per-position | DM=256, BS×SEQ=512 | 4.77e-07 |
 
-### 性能（预计）
+全部通过 1e-4 阈值。
 
-| 版本 | launches/step | 预期 it/s |
-|------|--------------|----------|
+### 性能
+
+| 版本 | launches/step | 推理 it/s |
+|------|--------------|-----------|
 | Python baseline | ~1280 | ~1.4 |
-| K1+K2 (之前) | ~640 | ~1.54 |
-| **K3 (当前)** | **~130** | **~2.0+** |
+| K3 + K4 head batch | **~1** | **4.2** |
 
 ### 训练调用方式
 
 ```python
 model.train()
 opt.zero_grad()
-logits = model(x)              # 自动 fused forward
+logits = model(x)              # K3 fused forward + K4 batched head
 loss = F.cross_entropy(...)
-loss.backward()                 # Python backward
+loss.backward()                 # Python backward（FusedExpertFunction）
 model.finish_training_step()   # expert 参数梯度
 opt.step()
 ```
-
-### 后续方向
-
-- K4: head projection fusion（~2 launches/step，预期 3-4 it/s）
-- 纯 CUDA backward kernel 可以后续逐步替换 Python 部分进一步加速

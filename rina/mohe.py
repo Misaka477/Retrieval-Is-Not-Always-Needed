@@ -9,12 +9,12 @@ INHIBIT_LR = 0.1
 
 try:
     import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from kernels import fused_all_experts as _fused_all_experts
+    from rina.kernels import fused_all_experts as _fused_all_experts
 except Exception:
     _fused_all_experts = None
 
 try:
-    from kernels_train import FusedExpertFunction, compute_param_grads, apply_param_grads as _apply_pg, pack_weights
+    from rina.kernels.train import FusedExpertFunction, compute_param_grads, apply_param_grads as _apply_pg, pack_weights
     _train_fuse = True
 except Exception:
     _train_fuse = False
@@ -150,7 +150,7 @@ class MoHE(nn.Module):
     def finish_training_step(self):
         """Call after loss.backward() to compute expert parameter gradients."""
         if _train_fuse:
-            from kernels_train import compute_param_grads, apply_param_grads
+            from rina.kernels.train import compute_param_grads, apply_param_grads
             grads = compute_param_grads()
             if grads is not None:
                 apply_param_grads(self, grads)

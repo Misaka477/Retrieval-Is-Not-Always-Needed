@@ -206,7 +206,9 @@ The per-expert forward computation (K1+K2) was fused into a single **K3 kernel**
 
 **Training**: hybrid approach — fused CUDA forward + Python backward via `FusedExpertFunction` (torch.autograd.Function). Gradient precision < 1e-6.
 
-**Files:** `kernels.py` (K3 forward), `kernels_train.py` (training autograd Function), `rina/mohe.py` (integrated `finish_training_step()`).
+**K4 (head batching):** head projection moved out of position loop, batched into single GEMM (M=512 vs M=8). Inference: **4.2 it/s** (+68%).
+
+**Files:** `rina/kernels/` (K3 forward), `rina/kernels/train.py` (training Function), `rina/mohe.py` (integrated). K1+K2 removed (K3 `ne=1` replaces both).
 
 ## References
 
@@ -336,7 +338,7 @@ MoHE: 4 专家，赢家通吃 Hebbian + 输家抑制
 
 训练使用混合方案：fused CUDA forward + Python backward（`FusedExpertFunction` autograd Function），梯度精度 < 1e-6。
 
-**文件：** `kernels.py`（K3 forward）、`kernels_train.py`（训练 autograd Function）、`rina/mohe.py`（集成 `finish_training_step()` 方法）。
+**文件：** `rina/kernels/`（K3 forward）、`rina/kernels/train.py`（训练 autograd Function）、`rina/mohe.py`（集成）。K1+K2 已删除。K4 head batch 将推理提升至 **4.2 it/s**。
 
 ## 参考
 
