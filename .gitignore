@@ -17,4 +17,6 @@ checkpoints/*.pt
 tokenizers/*
 paper/
 RINA_CHECKLIST.md
-
+HANDOVER.md
+generation_output.txt
+mohe_gen.txt

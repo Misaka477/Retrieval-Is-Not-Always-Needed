@@ -7,6 +7,12 @@ CONV_THRESH = 0.05
 LR = 1e-4
 INHIBIT_LR = 0.1
 
+try:
+    import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from kernels import fused_expert as _fused_expert
+except Exception:
+    _fused_expert = None
+
 
 class ExpertCell(nn.Module):
     """Single Hebbian expert: fast SSM + slow linear field."""
@@ -81,7 +87,11 @@ class MoHE(nn.Module):
                 h_exps = []
                 h_fasts = []
                 for i, expert in enumerate(self.experts):
-                    h_out, h_fast = expert(h, x_emb)
+                    if _fused_expert is not None:
+                        P = expert.patterns.T @ expert.patterns
+                        h_out, h_fast = _fused_expert(h, x_emb, expert, P)
+                    else:
+                        h_out, h_fast = expert(h, x_emb)
                     h_exps.append(h_out)
                     h_fasts.append(h_fast)
 
