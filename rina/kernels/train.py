@@ -313,6 +313,7 @@ class FusedExpertFunction(torch.autograd.Function):
             for k in ['grad_logit_a', 'grad_logit_b', 'grad_xp_out', 'grad_fm_out',
                       'grad_logit_s', 'grad_nw', 'grad_nb']:
                 FusedExpertFunction._last_grads[k] += gs[k]
+        ctx._saved = None
         return grad_h, grad_x, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 
