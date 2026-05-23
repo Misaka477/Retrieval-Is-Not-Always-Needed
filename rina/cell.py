@@ -36,6 +36,7 @@ class TemporalSNNCell(nn.Module):
         self.register_buffer("att_calls", torch.zeros(1))
         self.register_buffer("total_steps", torch.zeros(1))
         self.register_buffer("hebbian_updates", torch.zeros(1))
+        self.reverse_gating = False
 
     def forward(self, h, x, step=0):
         bsz, dm = h.shape
@@ -51,6 +52,8 @@ class TemporalSNNCell(nn.Module):
         is_att_step = (step % self.attract_every == (self.attract_every - 1))
         if self.error_threshold[0] < 0:
             need_att = torch.ones(bsz, dtype=torch.bool, device=h.device)
+        elif self.reverse_gating:
+            need_att = error < self.error_threshold[0]
         else:
             need_att = error > self.error_threshold[0]
         do_att = is_att_step & need_att
