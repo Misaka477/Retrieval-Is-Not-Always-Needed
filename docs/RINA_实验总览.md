@@ -325,3 +325,60 @@ mohe_large（FW+StarCoder+OpenWebMath 200M, 正在跑）
 - **Head init: N(0,0.001) + bias=-10.8**（50K 词表稳定）
 - **NaN 时 scheduler.step() 必执行**（warmup 不卡死）
 - **赢家通吃 Hebbian + 输家抑制**（专家分化保障）
+
+---
+
+## 7. K3 GPU Kernel 优化：N-Expert Fused 算子（2026-05-24）
+
+### 目标
+
+将 MoHE 每步 4 个专家的计算（原 8 次 kernel launch: K1+K2 × 4）融合为 1 次 launch。
+
+### 最终方案：混合加速
+
+| 阶段 | 方案 | Launch 数 |
+|------|------|-----------|
+| **Forward** | K3 fused CUDA kernel | **1**（替代 8） |
+| **Backward (input grads)** | Python autograd（保存中间值） | N/A |
+| **Backward (param grads)** | `compute_param_grads()` + `apply_param_grads()` | N/A |
+
+纯 CUDA backward kernel 存在 shared memory 竞争条件无法解决，改用 Python 实现 backward（使用 K3 forward 保存的中间激活值），精度误差 < 1e-6。
+
+### 关键文件
+
+- `kernels.py` — K3 forward kernel（通用 N-expert fused，已集成到推理路径）
+- `kernels_train.py` — `FusedExpertFunction` autograd Function + 参数梯度计算
+- `rina/mohe.py` — 集成训练路径，新增 `finish_training_step()` 方法
+
+### 精度验证
+
+| 测试 | 配置 | max error |
+|------|------|-----------|
+| Forward 精度 | DM=64/128/256, NE=2/4 | 8.34e-07 |
+| Gradient 精度 | DM=64/128, NE=2/4 | 9.54e-07 |
+| 端到端训练循环 | DM=256, NE=4, 3 step | 梯度非零，正常衰减 |
+
+### 性能（预计）
+
+| 版本 | launches/step | 预期 it/s |
+|------|--------------|----------|
+| Python baseline | ~1280 | ~1.4 |
+| K1+K2 (之前) | ~640 | ~1.54 |
+| **K3 (当前)** | **~130** | **~2.0+** |
+
+### 训练调用方式
+
+```python
+model.train()
+opt.zero_grad()
+logits = model(x)              # 自动 fused forward
+loss = F.cross_entropy(...)
+loss.backward()                 # Python backward
+model.finish_training_step()   # expert 参数梯度
+opt.step()
+```
+
+### 后续方向
+
+- K4: head projection fusion（~2 launches/step，预期 3-4 it/s）
+- 纯 CUDA backward kernel 可以后续逐步替换 Python 部分进一步加速

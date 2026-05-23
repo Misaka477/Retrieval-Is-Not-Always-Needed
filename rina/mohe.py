@@ -9,9 +9,16 @@ INHIBIT_LR = 0.1
 
 try:
     import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from kernels import fused_expert as _fused_expert
+    from kernels import fused_expert as _fused_expert, fused_all_experts as _fused_all_experts
 except Exception:
     _fused_expert = None
+    _fused_all_experts = None
+
+try:
+    from kernels_train import FusedExpertFunction, compute_param_grads, apply_param_grads as _apply_pg, pack_weights
+    _train_fuse = True
+except Exception:
+    _train_fuse = False
 
 
 class ExpertCell(nn.Module):
@@ -64,6 +71,8 @@ class MoHE(nn.Module):
         self.register_buffer("prev_route", torch.zeros(4))
         self.inertia = 0.7
         self.loser_inhibit = INHIBIT_LR
+        self._packed_weights = None
+        self._packed_P = None
 
     def forward(self, x, max_depth=1):
         bsz, seq_len = x.shape
@@ -86,14 +95,25 @@ class MoHE(nn.Module):
 
                 h_exps = []
                 h_fasts = []
-                for i, expert in enumerate(self.experts):
-                    if _fused_expert is not None:
-                        P = expert.patterns.T @ expert.patterns
-                        h_out, h_fast = _fused_expert(h, x_emb, expert, P)
-                    else:
-                        h_out, h_fast = expert(h, x_emb)
-                    h_exps.append(h_out)
-                    h_fasts.append(h_fast)
+                if self.training and _train_fuse:
+                    gw, gb, fw, fb, pw_, pb_, P, fmw, fmb, nw, nb, sw, sb = pack_weights(self)
+                    h_out_pk, h_fast_pk = FusedExpertFunction.apply(
+                        h, x_emb, gw, gb, fw, fb, pw_, pb_, P, fmw, fmb, nw, nb, sw, sb)
+                    h_exps = [h_out_pk[i] for i in range(len(self.experts))]
+                    h_fasts = [h_fast_pk[i] for i in range(len(self.experts))]
+                elif _fused_all_experts is not None:
+                    h_out_packed, h_fast_packed = _fused_all_experts(h, x_emb, self)
+                    h_exps = [h_out_packed[i] for i in range(len(self.experts))]
+                    h_fasts = [h_fast_packed[i] for i in range(len(self.experts))]
+                else:
+                    for i, expert in enumerate(self.experts):
+                        if _fused_expert is not None:
+                            P = expert.patterns.T @ expert.patterns
+                            h_out, h_fast = _fused_expert(h, x_emb, expert, P)
+                        else:
+                            h_out, h_fast = expert(h, x_emb)
+                        h_exps.append(h_out)
+                        h_fasts.append(h_fast)
 
                 h_stack = torch.cat(h_exps, dim=-1)
                 h_new = self.consolidate_norm(self.consolidate(h_stack))
@@ -132,3 +152,11 @@ class MoHE(nn.Module):
             logits.append(torch.clamp(self.head(self.state_norm(h)) / 3, -20, 20))
 
         return torch.stack(logits, dim=1)
+
+    def finish_training_step(self):
+        """Call after loss.backward() to compute expert parameter gradients."""
+        if _train_fuse:
+            from kernels_train import compute_param_grads, apply_param_grads
+            grads = compute_param_grads()
+            if grads is not None:
+                apply_param_grads(self, grads)

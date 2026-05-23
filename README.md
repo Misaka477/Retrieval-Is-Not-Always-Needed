@@ -194,6 +194,20 @@ MoHE: 4 experts, winner-take-all Hebbian + loser inhibition
 
 **Experiments:** `experiments/mohe_large_run.py` (200M main), `experiments/mohe_multiexpert.py` (WikiText MoHE), `experiments/selfplay_dual_memory.py` (linear field proof, ppL 93.4).
 
+### K3 GPU Kernel Optimization
+
+The per-expert forward computation (K1+K2) was fused into a single **K3 kernel** — 1 CUDA launch vs 8 per step:
+
+| Version | launches/step | Speed-up |
+|---------|--------------|----------|
+| Python baseline | ~1280 | 1× |
+| K1+K2 | ~640 | ~1.1× |
+| **K3 forward** | **1** | **~2×** |
+
+**Training**: hybrid approach — fused CUDA forward + Python backward via `FusedExpertFunction` (torch.autograd.Function). Gradient precision < 1e-6.
+
+**Files:** `kernels.py` (K3 forward), `kernels_train.py` (training autograd Function), `rina/mohe.py` (integrated `finish_training_step()`).
+
 ## References
 
 - `docs/RINA实验日志.md` — full experiment log (May 15-21, 2026, 4274 lines)
@@ -309,6 +323,20 @@ MoHE: 4 专家，赢家通吃 Hebbian + 输家抑制
 - `experiments/mohe_large_run.py` — 200M tokens 主线
 - `experiments/mohe_multiexpert.py` — WikiText MoHE（ppL=133）
 - `experiments/selfplay_dual_memory.py` — 单层线性场验证（ppL=93.4）
+
+### K3 GPU 算子优化
+
+将每步 4 专家的前向计算（原 K1+K2 × 4 = 8 次 launch）融合为 **1 次 launch**：
+
+| 版本 | launches/step | 加速比 |
+|------|--------------|--------|
+| Python baseline | ~1280 | 1× |
+| K1+K2 | ~640 | ~1.1× |
+| **K3 forward** | **1** | **~2×** |
+
+训练使用混合方案：fused CUDA forward + Python backward（`FusedExpertFunction` autograd Function），梯度精度 < 1e-6。
+
+**文件：** `kernels.py`（K3 forward）、`kernels_train.py`（训练 autograd Function）、`rina/mohe.py`（集成 `finish_training_step()` 方法）。
 
 ## 参考
 

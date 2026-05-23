@@ -14,7 +14,7 @@ from rina.mohe import MoHE
 device = "cuda"; torch.manual_seed(42); random.seed(42)
 VOCAB, DM = 50257, 256
 SEQ, BS = 64, 8
-LR = 1e-4; EPOCHS = 5
+LR = 1e-4; EPOCHS = 2
 SUBSAMPLE = 8; MAX_TOKENS = 200_000_000
 MAX_DEPTH = 1
 CONV_THRESH = 0.05; INHIBIT_LR = 0.1
