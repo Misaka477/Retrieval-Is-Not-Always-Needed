@@ -41,7 +41,8 @@ def np_save_chunked(path, arr):
 def load_or_tokenize(src, cfg, split, cache, desc, max_tokens=MAX_TOKENS):
     cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), CKPT_DIR, cache)
     if os.path.exists(cache_path):
-        ids = torch.from_numpy(np.load(cache_path))
+        ids = np.load(cache_path, mmap_mode='r')
+        ids = torch.from_numpy(ids)
         print(f"  {desc}: {len(ids):,} tokens (cached)")
         return ids
     print(f"  Loading {desc}...")
