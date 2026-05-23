@@ -133,12 +133,11 @@ for ep in range(start_ep, EPOCHS + 1):
         model.finish_training_step()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step(); scheduler.step()
-        if bi % 100 == 0:
+        total_loss += loss.item()
+        if bi % 10 == 0:
             alloc_mb = torch.cuda.memory_allocated() / 1024**2
             reserved_mb = torch.cuda.memory_reserved() / 1024**2
-            if alloc_mb > 1000:
-                print(f"\n  !!! alloc={alloc_mb:.0f}MB reserved={reserved_mb:.0f}MB at step {bi}")
-        total_loss += loss.item()
+            pbar.set_postfix(mem=f"{alloc_mb:.0f}MB", lr=f"{opt.param_groups[0]['lr']:.2e}")
         if bi % 200 == 199:
             ppl = torch.exp(torch.tensor(total_loss / (bi + 1))).item()
             lr_now = opt.param_groups[0]['lr']
