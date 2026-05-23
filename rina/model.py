@@ -8,7 +8,7 @@ from rina.cell import TemporalSNNCell
 class TemporalSNNModel(nn.Module):
     def __init__(self, vocab_size, d_model=256, n_patterns=4096,
                  beta=1.0, attract_every=1, error_threshold=0.5,
-                 hebbian_lr=0.0, inhibition_threshold=0.0, pattern_rank=0,
+                 hebbian_lr=0.0, hebbian_decay=0.999, inhibition_threshold=0.0, pattern_rank=0,
                  n_slots=0):
         super().__init__()
         self.d_model = d_model
@@ -18,6 +18,7 @@ class TemporalSNNModel(nn.Module):
                                      beta=beta, attract_every=attract_every,
                                      error_threshold=error_threshold,
                                      hebbian_lr=hebbian_lr,
+                                     hebbian_decay=hebbian_decay,
                                      inhibition_threshold=inhibition_threshold,
                                      pattern_rank=pattern_rank)
         self.head = nn.Linear(d_model, vocab_size)
@@ -64,6 +65,7 @@ class TemporalSNNModel(nn.Module):
     @torch.no_grad()
     def generate(self, prompt_ids, max_len=128, temperature=0.8, top_k=20):
         self.eval()
+        self.cell.reverse_gating = True
         x = torch.tensor([prompt_ids], dtype=torch.long, device=next(self.parameters()).device)
         for _ in range(max_len):
             logits = self(x)
@@ -75,6 +77,7 @@ class TemporalSNNModel(nn.Module):
             next_id = torch.multinomial(probs, 1).item()
             x = torch.cat([x[:, -63:], torch.tensor([[next_id]], device=x.device)], dim=1)
             yield next_id
+        self.cell.reverse_gating = False
 
     def get_att_rate(self):
         return self.cell.att_rate
