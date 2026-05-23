@@ -173,6 +173,27 @@ requirements.txt            — torch, tokenizers, datasets, tqdm, transformers
 Developed and tested on a single **NVIDIA GeForce RTX 3070 Ti Laptop (8 GB VRAM)**.  
 Training time: ~10 hours for 13 epochs on WikiText-103 (38M tokens).
 
+## v3 MoHE (Active Development)
+
+MoHE (Mixture of Hebbian Experts) is the current architecture — gated dual-memory linear recurrence:
+
+```
+Fast memory:  h_fast = a·h_{t-1} + b·x_t          ← SSM gate
+Slow memory:  P = patterns.T @ patterns             ← Hebbian field
+Fusion:       h = h_fast + gate·(h_fast @ P)        ← gated dual-memory
+
+Depth-of-Thought: iterative refinement over N passes
+MoHE: 4 experts, winner-take-all Hebbian + loser inhibition
+```
+
+**Key results** (28M, GPT-2 50K vocab, depth=1→2):
+- WikiText-103 (3M tokens): **ppL 133.3** (ep12, stable training)
+- FineWeb+StarCoder+OpenWebMath (200M, running): **ppL ~1920** (ep1/5)
+
+**Key innovations:** winner-take-all Hebbian (domain specialization), Depth-of-Thought (hidden-space iteration, not token-space CoT), linear field `h @ patterns.T @ patterns` (no softmax → associative-scan friendly), expert inertia (routing smoothing), online Hebbian (model learns after deployment).
+
+**Experiments:** `experiments/mohe_large_run.py` (200M main), `experiments/mohe_multiexpert.py` (WikiText MoHE), `experiments/selfplay_dual_memory.py` (linear field proof, ppL 93.4).
+
 ## References
 
 - `docs/RINA实验日志.md` — full experiment log (May 15-21, 2026, 4274 lines)
@@ -266,6 +287,28 @@ archive/        — 废弃实验，未删除
 
 单张 **NVIDIA GeForce RTX 3070 Ti Laptop (8 GB VRAM)** 开发。  
 WikiText-103（38M tokens）训练约 10 小时。
+
+## v3 MoHE（当前开发中）
+
+MoHE（Mixture of Hebbian Experts）——门控双记忆线性递回，当前主线架构：
+
+```
+快记忆: h_fast = a·h + b·x          ← SSM 门控
+慢记忆: P = patterns.T @ patterns   ← Hebbian 联想场
+融合:   h = h_fast + gate·(h @ P)   ← 门控双记忆
+
+Depth-of-Thought: 隐藏空间迭代精化
+MoHE: 4 专家，赢家通吃 Hebbian + 输家抑制
+```
+
+**实验结果（28M, GPT-2 50K 词表）：**
+- WikiText-103（3M tokens）：**ppL 133.3**（ep12，稳定训练）
+- FineWeb+StarCoder+OpenWebMath（200M，正在跑）：**ppL ~1920**（ep1/5）
+
+**实验：** 
+- `experiments/mohe_large_run.py` — 200M tokens 主线
+- `experiments/mohe_multiexpert.py` — WikiText MoHE（ppL=133）
+- `experiments/selfplay_dual_memory.py` — 单层线性场验证（ppL=93.4）
 
 ## 参考
 
