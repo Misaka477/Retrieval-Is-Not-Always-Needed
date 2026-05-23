@@ -336,6 +336,7 @@ def compute_param_grads():
     grads['slow_gate.weight'] = torch.einsum('nb,nbk->nk', s['grad_logit_s'], s['combined_ne'])
     grads['slow_gate.bias'] = s['grad_logit_s'].sum(1)
     FusedExpertFunction._last_grads = None
+    torch.cuda.empty_cache()
     return grads
 
 

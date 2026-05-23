@@ -134,21 +134,19 @@ def fused_all_experts(h, x_emb, model):
     bs, dm = h.shape
     h_out_packed = torch.empty(ne, bs, dm, device=h.device)
     h_fast_packed = torch.empty(ne, bs, dm, device=h.device)
-    # Pack weights
-    gw = torch.stack([e.gate_a.weight for e in model.experts])
-    gb = torch.stack([e.gate_a.bias for e in model.experts])
-    fw = torch.stack([e.gate_b.weight for e in model.experts])
-    fb = torch.stack([e.gate_b.bias for e in model.experts])
-    pw = torch.stack([e.proj_in.weight for e in model.experts])
-    pb = torch.stack([e.proj_in.bias for e in model.experts])
     P = torch.stack([e.patterns.T @ e.patterns for e in model.experts])
-    fmw = torch.stack([e.field_mix.weight for e in model.experts])
-    fmb = torch.stack([e.field_mix.bias for e in model.experts])
-    nw = torch.stack([e.norm.weight for e in model.experts])
-    nb = torch.stack([e.norm.bias for e in model.experts])
-    sw = torch.stack([e.slow_gate.weight.squeeze(0) for e in model.experts])
-    sb = torch.stack([e.slow_gate.bias.squeeze(0) for e in model.experts])
     _K3.f3(h_out_packed, h_fast_packed, h, x_emb,
-           gw, gb, fw, fb, pw, pb, P,
-           fmw, fmb, nw, nb, sw, sb)
+           torch.stack([e.gate_a.weight for e in model.experts]),
+           torch.stack([e.gate_a.bias for e in model.experts]),
+           torch.stack([e.gate_b.weight for e in model.experts]),
+           torch.stack([e.gate_b.bias for e in model.experts]),
+           torch.stack([e.proj_in.weight for e in model.experts]),
+           torch.stack([e.proj_in.bias for e in model.experts]),
+           P,
+           torch.stack([e.field_mix.weight for e in model.experts]),
+           torch.stack([e.field_mix.bias for e in model.experts]),
+           torch.stack([e.norm.weight for e in model.experts]),
+           torch.stack([e.norm.bias for e in model.experts]),
+           torch.stack([e.slow_gate.weight.squeeze(0) for e in model.experts]),
+           torch.stack([e.slow_gate.bias.squeeze(0) for e in model.experts]))
     return h_out_packed, h_fast_packed
