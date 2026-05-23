@@ -325,7 +325,3 @@ mohe_large（FW+StarCoder+OpenWebMath 200M, 正在跑）
 - **Head init: N(0,0.001) + bias=-10.8**（50K 词表稳定）
 - **NaN 时 scheduler.step() 必执行**（warmup 不卡死）
 - **赢家通吃 Hebbian + 输家抑制**（专家分化保障）
-
-### 创新定位
-
-MoHE 独占的五者交集：MoE + 推理时 Hebbian + 线性可 scan + Depth-of-Thought（隐空间迭代） + 赢家通吃分化。现有工作（MoRAM、HEBATRON、ASMG）各占 1-2 项，无全部。
