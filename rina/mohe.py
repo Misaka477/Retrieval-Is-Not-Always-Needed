@@ -9,9 +9,8 @@ INHIBIT_LR = 0.1
 
 try:
     import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from kernels import fused_expert as _fused_expert, fused_all_experts as _fused_all_experts
+    from kernels import fused_all_experts as _fused_all_experts
 except Exception:
-    _fused_expert = None
     _fused_all_experts = None
 
 try:
@@ -76,9 +75,10 @@ class MoHE(nn.Module):
 
     def forward(self, x, max_depth=1):
         bsz, seq_len = x.shape
+        dm = self.experts[0].patterns.shape[1]
         emb = self.embed_norm(self.embed(x))
-        h = torch.zeros(bsz, self.experts[0].patterns.shape[1], device=x.device)
-        logits = []
+        h = torch.zeros(bsz, dm, device=x.device)
+        h_seq = []
 
         for t in range(seq_len):
             x_emb = emb[:, t, :]
@@ -101,19 +101,10 @@ class MoHE(nn.Module):
                         h, x_emb, gw, gb, fw, fb, pw_, pb_, P, fmw, fmb, nw, nb, sw, sb)
                     h_exps = [h_out_pk[i] for i in range(len(self.experts))]
                     h_fasts = [h_fast_pk[i] for i in range(len(self.experts))]
-                elif _fused_all_experts is not None:
+                else:
                     h_out_packed, h_fast_packed = _fused_all_experts(h, x_emb, self)
                     h_exps = [h_out_packed[i] for i in range(len(self.experts))]
                     h_fasts = [h_fast_packed[i] for i in range(len(self.experts))]
-                else:
-                    for i, expert in enumerate(self.experts):
-                        if _fused_expert is not None:
-                            P = expert.patterns.T @ expert.patterns
-                            h_out, h_fast = _fused_expert(h, x_emb, expert, P)
-                        else:
-                            h_out, h_fast = expert(h, x_emb)
-                        h_exps.append(h_out)
-                        h_fasts.append(h_fast)
 
                 h_stack = torch.cat(h_exps, dim=-1)
                 h_new = self.consolidate_norm(self.consolidate(h_stack))
@@ -149,9 +140,12 @@ class MoHE(nn.Module):
                                 expert.patterns.data.index_add_(0, k,
                                     -self.loser_inhibit * LR * delta)
 
-            logits.append(torch.clamp(self.head(self.state_norm(h)) / 3, -20, 20))
+            h_seq.append(h)
 
-        return torch.stack(logits, dim=1)
+        # Batched head: [bs, seq, dm] → [bs*seq, dm] → head → [bs*seq, vocab] → [bs, seq, vocab]
+        h_flat = torch.stack(h_seq, dim=1).reshape(-1, dm)
+        logits = torch.clamp(self.head(self.state_norm(h_flat)) / 3, -20, 20)
+        return logits.reshape(bsz, seq_len, -1)
 
     def finish_training_step(self):
         """Call after loss.backward() to compute expert parameter gradients."""

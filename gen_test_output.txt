@@ -1,0 +1,8 @@
+Prompt: The meaning of life is
+The meaning of life is                                                                                                    
+
+Prompt: def fibonacci(n):
+def fibonacci(n):                                                                                                    
+
+Prompt: The capital of France is
+The capital of France is                                                                                                    
