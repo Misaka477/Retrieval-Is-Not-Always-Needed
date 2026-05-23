@@ -382,3 +382,12 @@ loss.backward()                 # Python backward（FusedExpertFunction）
 model.finish_training_step()   # expert 参数梯度
 opt.step()
 ```
+
+### 待讨论：Raw Logits 与生成策略
+
+当前 MoHE 输出 raw logits，训练时 CrossEntropyLoss 内部做 softmax，推理时直接 `/3 + argmax`。
+
+可优化方向：
+1. 动态温度调节（Adaptive Temperature）：用输出分布的熵 H 反馈调节温度 T，低熵(复读) -> 调高 T 打散，高熵(乱码) -> 调低 T 收紧
+2. Top-P (Nucleus) Sampling 替代 argmax，增加生成多样性
+3. 三级生成控制：Temperature -> Top-P -> Sampling，纯生成侧改动不碰模型

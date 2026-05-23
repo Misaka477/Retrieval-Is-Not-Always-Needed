@@ -147,7 +147,7 @@ class MoHE(nn.Module):
 
         # Batched head: [bs, seq, dm] → [bs*seq, dm] → head → [bs*seq, vocab] → [bs, seq, vocab]
         h_flat = torch.stack(h_seq, dim=1).reshape(-1, dm)
-        logits = torch.clamp(self.head(self.state_norm(h_flat)) / 3, -20, 20)
+        logits = torch.clamp(self.head(self.state_norm(h_flat)), -20, 20)
         return logits.reshape(bsz, seq_len, -1)
 
     def finish_training_step(self):

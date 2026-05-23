@@ -8,7 +8,7 @@ os.environ.setdefault("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
 from tokenizers import Tokenizer
 from datasets import load_dataset
 from tqdm import tqdm
-import torch, torch.nn as nn, torch.nn.functional as F, random, numpy as np, io
+import torch, torch.nn as nn, torch.nn.functional as F, random, numpy as np, io, math
 from rina.mohe import MoHE
 
 device = "cuda"; torch.manual_seed(42); random.seed(42)
@@ -103,7 +103,11 @@ start_ep = 1
 resume_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), CKPT_DIR, f"{CKPT_NAME}_resume.pt")
 if os.path.exists(resume_path):
     ckpt = torch.load(resume_path, map_location=device, weights_only=False)
-    model.load_state_dict(ckpt["model"], strict=False)
+    sd = ckpt["model"]
+    for k in list(sd.keys()):
+        if k.startswith("prev_route"):
+            del sd[k]
+    model.load_state_dict(sd, strict=False)
     opt.load_state_dict(ckpt["opt"])
     start_ep = ckpt["ep"]
     if "scheduler" in ckpt:
@@ -125,7 +129,7 @@ for ep in range(start_ep, EPOCHS + 1):
         x = ids[start:start + BS * SEQ].view(BS, SEQ).to(device)
         opt.zero_grad()
         logits = model(x)
-        loss = F.cross_entropy(logits[:, :-1].reshape(-1, VOCAB), x[:, 1:].reshape(-1))
+        loss = F.cross_entropy(logits[:, :-1].reshape(-1, VOCAB), x[:, 1:].reshape(-1), label_smoothing=0.1)
         if torch.isnan(loss) or torch.isinf(loss):
             scheduler.step()
             continue
@@ -152,3 +156,19 @@ for ep in range(start_ep, EPOCHS + 1):
     ckpt = {"model": model.state_dict(), "opt": opt.state_dict(), "scheduler": scheduler.state_dict(), "ep": ep + 1, "ppl": ppl}
     torch.save(ckpt, resume_path)
     torch.save(ckpt, os.path.join(os.path.dirname(os.path.abspath(__file__)), CKPT_DIR, f"{CKPT_NAME}_ep{ep}.pt"))
+
+# ── Generate ──
+from rina.sample import sample
+
+print("Generating...")
+model.eval()
+for prompt in ["The meaning of life is", "def fibonacci(n):"]:
+    ids = tok.encode(prompt).ids[:10]
+    gen = ids[:]
+    for _ in range(100):
+        inp = torch.tensor([gen[-SEQ:]], device=device)
+        logits = model(inp)[0, -1, :]
+        gen.append(sample(logits).item())
+    text = tok.decode(gen).replace("\u0120", " ").replace("\u010a", "\n")
+    print(f"\nPrompt: {prompt}\n{text[:300]}")
+print("Done.")
