@@ -14,7 +14,7 @@ except Exception:
     _fused_all_experts = None
 
 try:
-    from rina.kernels.train import FusedExpertFunction, compute_param_grads, apply_param_grads as _apply_pg, pack_weights
+    from rina.kernels.train import FusedExpertFunction as _FEF
     _train_fuse = True
 except Exception:
     _train_fuse = False
@@ -80,14 +80,10 @@ class MoHE(nn.Module):
         h = torch.zeros(bsz, dm, device=x.device)
         h_seq = []
 
-        if self.training and _train_fuse:
-            gw, gb, fw, fb, pw_, pb_, _, fmw, fmb, nw, nb, sw, sb = pack_weights(self)
         for t in range(seq_len):
             x_emb = emb[:, t, :]
             self.prev_route.zero_()
             h_prev = h
-            if self.training and _train_fuse:
-                P = torch.stack([e.patterns.T @ e.patterns for e in self.experts])
 
             for depth in range(max_depth):
                 combined = torch.cat([h, x_emb], dim=-1)
@@ -99,11 +95,12 @@ class MoHE(nn.Module):
 
                 h_exps = []
                 h_fasts = []
-                if self.training and _train_fuse:
-                    h_out_pk, h_fast_pk = FusedExpertFunction.apply(
-                        h, x_emb, gw, gb, fw, fb, pw_, pb_, P, fmw, fmb, nw, nb, sw, sb)
-                    h_exps = [h_out_pk[i] for i in range(len(self.experts))]
-                    h_fasts = [h_fast_pk[i] for i in range(len(self.experts))]
+                if self.training:
+                    # Per-expert Python forward with native autograd
+                    for i, expert in enumerate(self.experts):
+                        h_out, h_fast = expert(h, x_emb)
+                        h_exps.append(h_out)
+                        h_fasts.append(h_fast)
                 else:
                     h_out_packed, h_fast_packed = _fused_all_experts(h, x_emb, self)
                     h_exps = [h_out_packed[i] for i in range(len(self.experts))]
