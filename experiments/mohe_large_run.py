@@ -138,11 +138,6 @@ for ep in range(start_ep, EPOCHS + 1):
             alloc = torch.cuda.memory_allocated() / 1024**2
             reserved = torch.cuda.memory_reserved() / 1024**2
             print(f"\n[step {bi}] alloc={alloc:.0f}MB reserved={reserved:.0f}MB", flush=True)
-        del logits, loss
-        if bi % 10 == 0:
-            alloc_mb = torch.cuda.memory_allocated() / 1024**2
-            reserved_mb = torch.cuda.memory_reserved() / 1024**2
-            pbar.set_postfix(mem=f"{alloc_mb:.0f}MB", lr=f"{opt.param_groups[0]['lr']:.2e}")
         if bi % 200 == 199:
             ppl = torch.exp(torch.tensor(total_loss / (bi + 1))).item()
             lr_now = opt.param_groups[0]['lr']
