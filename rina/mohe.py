@@ -80,10 +80,14 @@ class MoHE(nn.Module):
         h = torch.zeros(bsz, dm, device=x.device)
         h_seq = []
 
+        if self.training and _train_fuse:
+            gw, gb, fw, fb, pw_, pb_, _, fmw, fmb, nw, nb, sw, sb = pack_weights(self)
         for t in range(seq_len):
             x_emb = emb[:, t, :]
             self.prev_route.zero_()
             h_prev = h
+            if self.training and _train_fuse:
+                P = torch.stack([e.patterns.T @ e.patterns for e in self.experts])
 
             for depth in range(max_depth):
                 combined = torch.cat([h, x_emb], dim=-1)
@@ -96,7 +100,6 @@ class MoHE(nn.Module):
                 h_exps = []
                 h_fasts = []
                 if self.training and _train_fuse:
-                    gw, gb, fw, fb, pw_, pb_, P, fmw, fmb, nw, nb, sw, sb = pack_weights(self)
                     h_out_pk, h_fast_pk = FusedExpertFunction.apply(
                         h, x_emb, gw, gb, fw, fb, pw_, pb_, P, fmw, fmb, nw, nb, sw, sb)
                     h_exps = [h_out_pk[i] for i in range(len(self.experts))]
