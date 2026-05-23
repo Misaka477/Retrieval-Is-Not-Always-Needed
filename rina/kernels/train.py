@@ -306,6 +306,8 @@ class FusedExpertFunction(torch.autograd.Function):
                   grad_xp_out=g_xo.detach(), grad_fm_out=g_fo.detach(),
                   grad_logit_s=g_ls.detach(), grad_nw=g_nw, grad_nb=g_nb,
                   combined_ne=cn.detach(), x_emb=x_emb.detach(), sa_field=s['sa_field'].detach())
+        ctx._saved = None
+        del s
         if FusedExpertFunction._last_grads is None:
             gs.update(gw=gw.detach(), gb=gb.detach(), fw=fw.detach(), fb=fb.detach(),
                       pw=pw.detach(), pb=pb.detach(), fmw=fmw.detach(), fmb=fmb.detach(),

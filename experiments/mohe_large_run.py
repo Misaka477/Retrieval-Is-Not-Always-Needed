@@ -134,6 +134,11 @@ for ep in range(start_ep, EPOCHS + 1):
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step(); scheduler.step()
         total_loss += loss.item()
+        if bi % 50 == 0:
+            alloc = torch.cuda.memory_allocated() / 1024**2
+            reserved = torch.cuda.memory_reserved() / 1024**2
+            print(f"\n[step {bi}] alloc={alloc:.0f}MB reserved={reserved:.0f}MB", flush=True)
+        del logits, loss
         if bi % 10 == 0:
             alloc_mb = torch.cuda.memory_allocated() / 1024**2
             reserved_mb = torch.cuda.memory_reserved() / 1024**2
