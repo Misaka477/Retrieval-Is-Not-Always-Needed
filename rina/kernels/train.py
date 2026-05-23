@@ -166,7 +166,7 @@ __global__ void k3_bwd(
         float ghf=0;for(int j=0;j<dm;j++)ghf+=g_ft[base+j]*P[ed+j*dm+d];
         float gt=g_ho[base+d]+ghf+g_hf[base+d];
         g_hc[base+d]=gt*a_a[base+d];g_xo[base+d]=gt*a_b[base+d];
-        g_la[base+d]=gt*h[base+d]*a_a[base+d]*(1.f-a_a[base+d]);
+        g_la[base+d]=gt*h[b*dm+d]*a_a[base+d]*(1.f-a_a[base+d]);
         g_lb[base+d]=gt*a_xp[base+d]*a_b[base+d]*(1.f-a_b[base+d]);
         for(int j=0;j<dm;j++)atomicAdd(&g_Po[ed+d*dm+j],a_hf[base+d]*g_ft[base+j]);}
 }
