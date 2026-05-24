@@ -70,6 +70,11 @@ class MoHE(nn.Module):
         self.consolidate_norm = nn.LayerNorm(dm)
 
         self.topk = topk
+        self.router_bias = nn.Parameter(torch.zeros(n_experts))
+        self.expert_norm = nn.LayerNorm(dm)
+        self.bias_lr = 0.01
+        self.register_buffer("_batch_counts", torch.zeros(n_experts))
+        self.register_buffer("_batch_total", torch.zeros(1))
         self.register_buffer("prev_route", torch.zeros(n_experts))
         self.inertia = 0.4
         self.loser_inhibit = INHIBIT_LR
@@ -106,7 +111,7 @@ class MoHE(nn.Module):
             for depth in range(max_depth):
                 self._conv_total += 1
 
-                route_raw = self.router(x_emb)
+                route_raw = self.router(x_emb) + self.router_bias
                 if self.training and self.route_noise > 0:
                     route_raw = route_raw + torch.randn_like(route_raw) * self.route_noise
                 route_logits.append(route_raw)
@@ -139,6 +144,8 @@ class MoHE(nn.Module):
                     keep = torch.bernoulli(torch.full((len(self.experts),),
                         1 - self.expert_dropout, device=h.device)).unsqueeze(1).unsqueeze(2)
                     h_exps = [h * k for h, k in zip(h_exps, keep)]
+
+                h_exps = [self.expert_norm(h) for h in h_exps]
 
                 if self.topk > 0 and self.topk < len(self.experts):
                     _, indices = route_weights.topk(self.topk, dim=-1)
@@ -206,6 +213,15 @@ class MoHE(nn.Module):
             z_loss = (log_z ** 2).mean() * 1e-4
             self._last_aux_loss = aux_loss + z_loss
             self._gate_ratio = (p.max(-1).values / p.min(-1).values.clamp(min=1e-10)).median().item()
+            # Router bias adjustment
+            for e in range(len(self.experts)):
+                count = (logits_flat.argmax(-1) == e).float().sum().item()
+                target = logits_flat.size(0) / len(self.experts)
+                if count > target:
+                    self.router_bias.data[e] -= self.bias_lr
+                elif count < target:
+                    self.router_bias.data[e] += self.bias_lr
+            self.router_bias.data.clamp_(-2, 2)
         else:
             self._last_aux_loss = 0.0
 
