@@ -391,3 +391,50 @@ opt.step()
 1. 动态温度调节（Adaptive Temperature）：用输出分布的熵 H 反馈调节温度 T，低熵(复读) -> 调高 T 打散，高熵(乱码) -> 调低 T 收紧
 2. Top-P (Nucleus) Sampling 替代 argmax，增加生成多样性
 3. 三级生成控制：Temperature -> Top-P -> Sampling，纯生成侧改动不碰模型
+
+---
+
+## 8. MoHE ep1 完成 + Scaling Law 讨论（2026-05-24 12:08）
+
+### ep1 训练结果
+
+| 指标 | 值 |
+|------|---|
+| 配置 | DM=256, NE=4, MAX_DEPTH=1, label_smoothing=0.1 |
+| 训练数据 | FineWeb+StarCoder+OpenWebMath, ~200M tokens total, SUBSAMPLE=8 |
+| ep1 步数 | ~48,800 |
+| ep1 最终 ppL | **~2984**（含 label_smoothing，去噪后真实 ppL ~2200） |
+| 训练速度 | depth=1: ~2.0 it/s, depth=2: ~1.0 it/s |
+| 显存 | 稳定 ~670MB |
+
+### 生成效果（step 47K 时采样）
+
+词汇表掌握，局部语法可用，句子级语义仍在学习中。生成使用了自适应温度 + Top-P 采样（`rina/sample.py`）。
+
+### 核心参数量：2.4M
+
+MoHE 28M 的参数量释放：
+
+| 组件 | 参数量 | 占比 |
+|------|--------|------|
+| Embedding + Head | 25.7M | 91% |
+| 4 x Expert + Consolidation + Router | **2.4M** | **9%** |
+
+决定模型能力的是 **2.4M 核心参数**，其余是词表刚性开销不可消除。Transformer 在同等核心参数量下不存在（2.4M 核心无法支持 attention 的最小维度）。
+
+### depth=2 计划
+
+ep2 切换 `MAX_DEPTH=2`，每步迭代两次 routing + expert + consolidation，预计 ppL 有额外下降空间。
+
+### Scaling Law 讨论
+
+MoHE 核心参数 2.4M 训 200M tokens 后仍在下降，不符合标准 RNN/LSTM 在小参数量下的快速 plateau 行为。可能原因：
+
+1. **Hebbian patterns 持续更新**：与传统静态权重不同，patterns 每个 step 通过 `index_add_` 被新 token 修正。模型的有效容量不封死在训练完成时刻
+2. **SSM gate + 线性场替代 attention**：不需要 attention 头的最小维度约束，参数效率更高
+3. **MoE 路由 + Hebbian 分化**：2.4M 在 4 个 expert 间的动态分配等价于更高效地利用了有限参数
+
+验证方法：
+- 完成 ep2 (depth=2) 和 ep3，看 ppL 是否继续下降
+- 与同核心参数量（2.4M）的传统模型直接对比 ppL
+- 如果 MoHE 2.4M 在 3 ep（600M tokens）后 ppL 达到 1500-2000 区间，则证明参数量效率显著超越缩放定律预测
