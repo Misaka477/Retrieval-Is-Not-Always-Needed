@@ -69,7 +69,7 @@ __global__ void k3_light_fwd(float* h_out, float* h_fast_out,
         float gate=__frcp_rn(1.f+expf(-fminf(fmaxf(s_red[0]+sb[e],-30.f),30.f)));
         for(int d=tid;d<dm;d+=blockDim.x){
             int base=e*bs*dm+b*dm+d;
-            h_out[base]=__fma_rn(gate,s_fld[d],s_hf[d]*0.5f); h_fast_out[base]=s_hf[d];}
+            h_out[base]=__fma_rn(gate,s_fld[d],s_hf[d]*0.3f); h_fast_out[base]=s_hf[d];}
         __syncthreads();}}
 void fwd(float* h_out,float* h_fast_out,
     const float* h_fast,const float* h,const float* x,
@@ -150,7 +150,7 @@ __global__ void k3_light_bwd(
 
     for(int d=tid;d<dm;d+=blockDim.x){
         float ghf=0; for(int j=0;j<dm;j++)ghf+=g_ft[base+j]*P[ed+j*dm+d];
-        float gt=__fma_rn(g_ho[base+d],0.5f,ghf)+g_hf[base+d];
+        float gt=__fma_rn(g_ho[base+d],0.3f,ghf)+g_hf[base+d];
         g_hc[base+d]=gt;
         for(int j=0;j<dm;j++)atomicAdd(&g_Po[ed+d*dm+j],h_fast[base+d]*g_ft[base+j]);}
 }
