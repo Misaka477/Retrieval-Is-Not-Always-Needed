@@ -97,8 +97,7 @@ archive/dead_rina/    — dead files removed from rina/ (scan.py, cuda_graph.py,
 
 ## Hardware
 
-Single **NVIDIA GeForce RTX 3070 Ti Laptop (8 GB VRAM)**.  
-83M training: ~2.95s/step, ~670MB steady-state VRAM.
+ROG Zephyrus M16 2022 — RTX 3070 Ti Laptop (8 GB)
 
 ## References
 
@@ -213,8 +212,7 @@ archive/dead_rina/    — 从 rina/ 移出的死文件（scan.py, cuda_graph.py,
 
 ## 硬件
 
-单张 **NVIDIA GeForce RTX 3070 Ti Laptop（8 GB VRAM）**。  
-83M 训练：~2.95s/step，~670MB 稳态显存。
+ROG Zephyrus M16 2022 — RTX 3070 Ti Laptop（8 GB）
 
 ## 参考
 
