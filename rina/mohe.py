@@ -48,7 +48,7 @@ class ExpertCell(nn.Module):
 class MoHE(nn.Module):
     """Multi-layer MoHE with Depth-of-Thought."""
     def __init__(self, vocab, dm, np_, n_experts=4, aux_loss_weight=0.1,
-                 route_noise=0.0, expert_dropout=0.0):
+                 route_noise=0.0, expert_dropout=0.0, topk=0):
         super().__init__()
         self.aux_loss_weight = aux_loss_weight
         self.route_noise = route_noise
@@ -69,6 +69,7 @@ class MoHE(nn.Module):
         self.consolidate = nn.Linear(dm * n_experts, dm)
         self.consolidate_norm = nn.LayerNorm(dm)
 
+        self.topk = topk
         self.register_buffer("prev_route", torch.zeros(n_experts))
         self.inertia = 0.4
         self.loser_inhibit = INHIBIT_LR
@@ -138,6 +139,11 @@ class MoHE(nn.Module):
                     keep = torch.bernoulli(torch.full((len(self.experts),),
                         1 - self.expert_dropout, device=h.device)).unsqueeze(1).unsqueeze(2)
                     h_exps = [h * k for h, k in zip(h_exps, keep)]
+
+                if self.topk > 0 and self.topk < len(self.experts):
+                    _, indices = route_weights.topk(self.topk, dim=-1)
+                    mask = torch.zeros_like(route_weights).scatter_(1, indices, 1)
+                    h_exps = [h * mask[:, i:i+1] for i, h in enumerate(h_exps)]
 
                 h_stack = torch.cat(h_exps, dim=-1)
                 h_new = self.consolidate_norm(self.consolidate(h_stack))

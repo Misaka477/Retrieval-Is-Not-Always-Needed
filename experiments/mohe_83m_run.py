@@ -87,7 +87,7 @@ nb = (len(ids) - 1) // (BS * SEQ)
 print(f"  total: {len(ids):,} tokens, {nb} batches/epoch")
 
 model = MoHE(VOCAB, DM, NP, n_experts=4,
-             aux_loss_weight=0.5, route_noise=0.1, expert_dropout=0.1).to(device)
+             aux_loss_weight=0.5, route_noise=0.1, expert_dropout=0.1, topk=2).to(device)
 n = sum(p.numel() for p in model.parameters())
 print(f"Params: {n/1e6:.2f}M")
 opt = torch.optim.AdamW(model.parameters(), lr=LR)
