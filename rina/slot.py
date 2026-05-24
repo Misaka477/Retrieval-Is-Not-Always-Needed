@@ -1,3 +1,4 @@
+# DEPRECATED ¡ª legacy TemporalSNN architecture, use rina.mohe.MoHE instead
 import torch
 
 

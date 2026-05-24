@@ -1,6 +1,7 @@
 """
-MoHE on FineWeb + StarCoder (200M tokens). 
+MoHE 83M on FineWeb + StarCoder (200M tokens). 
 Depth-of-Thought, winner-take-all Hebbian, GPT-2 50K vocab.
+Weight tying enabled (head.weight = embed.weight).
 """
 import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
@@ -8,24 +9,22 @@ os.environ.setdefault("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
 from tokenizers import Tokenizer
 from datasets import load_dataset
 from tqdm import tqdm
-import torch, torch.nn as nn, torch.nn.functional as F, random, numpy as np, io, math
+import torch, torch.nn as nn, torch.nn.functional as F, random, numpy as np, io
 from rina.mohe import MoHE
 
 device = "cuda"; torch.manual_seed(42); random.seed(42)
-VOCAB, DM = 50257, 256
-SEQ, BS = 64, 8
+DEBUG_MEM = False  # set True to print alloc every 10 steps
+VOCAB, DM, NP = 50257, 1024, 512
+SEQ, BS = 128, 8
 LR = 1e-4; EPOCHS = 2
 SUBSAMPLE = 8; MAX_TOKENS = 200_000_000
-MAX_DEPTH = 2
-CONV_THRESH = 0.05; INHIBIT_LR = 0.1
-CKPT_DIR = "../checkpoints"; CKPT_NAME = "mohe_large"
+MAX_DEPTH = 1
+CKPT_DIR = "../checkpoints"; CKPT_NAME = "mohe_83m"
 os.makedirs(os.path.join(os.path.dirname(os.path.abspath(__file__)), CKPT_DIR), exist_ok=True)
 
-# ── Tokenizer ──
 print("Loading GPT-2 tokenizer...")
 tok = Tokenizer.from_pretrained("gpt2")
 
-# ── Data (FineWeb 80% + StarCoder 20%) ──
 CACHE_FW = os.path.join(os.path.dirname(os.path.abspath(__file__)), CKPT_DIR, "mohe_fw.npy")
 CACHE_SC = os.path.join(os.path.dirname(os.path.abspath(__file__)), CKPT_DIR, "mohe_sc.npy")
 
@@ -77,46 +76,33 @@ def load_or_tokenize(src, cfg, split, cache, desc, max_tokens=MAX_TOKENS):
 ids_fw = load_or_tokenize("HuggingFaceFW/fineweb", "sample-10BT", "train", "mohe_fw.npy", "FineWeb")
 ids_sc = load_or_tokenize("bigcode/starcoderdata", None, "train", "mohe_sc.npy", "StarCoder")
 ids_math = load_or_tokenize("open-web-math/open-web-math", None, "train", "mohe_math.npy", "OpenWebMath")
-# 7:1.5:1.5 (FW : SC : Math)
 n_fw = int(MAX_TOKENS * 0.70)
 n_sc = int(MAX_TOKENS * 0.15)
 n_math = MAX_TOKENS - n_fw - n_sc
-ids_fw = ids_fw[:n_fw]
-ids_sc = ids_sc[:n_sc]
-ids_math = ids_math[:n_math]
-# Shuffle interleave
+ids_fw = ids_fw[:n_fw]; ids_sc = ids_sc[:n_sc]; ids_math = ids_math[:n_math]
 ids = torch.cat([ids_fw, ids_sc, ids_math])
 perm = torch.randperm(len(ids))
 ids = ids[perm]
 nb = (len(ids) - 1) // (BS * SEQ)
 print(f"  total: {len(ids):,} tokens, {nb} batches/epoch")
 
-# ── Model ──
-model = MoHE(VOCAB, DM, 512, n_experts=4).to(device)
+model = MoHE(VOCAB, DM, NP, n_experts=4).to(device)
 n = sum(p.numel() for p in model.parameters())
 print(f"Params: {n/1e6:.2f}M")
 opt = torch.optim.AdamW(model.parameters(), lr=LR)
 scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lambda step: min(1.0, step / 500))
 
-# ── Resume ──
+start_ep = 1
 resume_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), CKPT_DIR, f"{CKPT_NAME}_resume.pt")
-if not os.path.exists(resume_path):
-    resume_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), CKPT_DIR, f"{CKPT_NAME}_ep1.pt")
 if os.path.exists(resume_path):
     ckpt = torch.load(resume_path, map_location=device, weights_only=False)
     sd = ckpt["model"]
     for k in list(sd.keys()):
         if k.startswith("prev_route"):
             del sd[k]
-    # Migrate router: old has shape [4, 512] (combined=h+x), new is [4, 256] (x only)
     rw = sd.get("router.weight")
-    if rw is not None and rw.shape[-1] != DM * 2:
-        pass  # already correct shape, do nothing
-    elif rw is not None and rw.shape[-1] == DM * 2:
-        sd["router.weight"] = rw[:, DM:]  # take x_emb half (last DM columns)
-    rb = sd.get("router.bias")
-    if rb is not None:
-        sd["router.bias"] = rb  # bias unchanged (always [ne])
+    if rw is not None and rw.shape[-1] == DM * 2:
+        sd["router.weight"] = rw[:, DM:]
     model.load_state_dict(sd, strict=False)
     opt.load_state_dict(ckpt["opt"])
     start_ep = ckpt["ep"]
@@ -124,9 +110,8 @@ if os.path.exists(resume_path):
         scheduler.load_state_dict(ckpt["scheduler"])
     print(f"  Resumed from ep {start_ep}")
 
-# ── Training ──
 LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), CKPT_DIR, f"{CKPT_NAME}.csv")
-print("Training MoHE on FineWeb+StarCoder...")
+print("Training MoHE 83M on FineWeb+StarCoder+OpenWebMath...")
 global_step = 0
 for ep in range(start_ep, EPOCHS + 1):
     model.train(); total_loss = 0.0
@@ -148,6 +133,10 @@ for ep in range(start_ep, EPOCHS + 1):
         model.finish_training_step()
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).item()
         opt.step(); scheduler.step()
+        torch.cuda.empty_cache()
+        if DEBUG_MEM and bi % 10 == 0:
+            alloc = torch.cuda.memory_allocated() / 1024**2
+            print(f"\nstep {bi} alloc={alloc:.0f}MB", flush=True)
         total_loss += loss.item()
         if bi % 200 == 199:
             ppl = torch.exp(torch.tensor(total_loss / (bi + 1))).item()
@@ -187,19 +176,3 @@ for ep in range(start_ep, EPOCHS + 1):
     ckpt = {"model": model.state_dict(), "opt": opt.state_dict(), "scheduler": scheduler.state_dict(), "ep": ep + 1, "ppl": ppl}
     torch.save(ckpt, resume_path)
     torch.save(ckpt, os.path.join(os.path.dirname(os.path.abspath(__file__)), CKPT_DIR, f"{CKPT_NAME}_ep{ep}.pt"))
-
-# ── Generate ──
-from rina.sample import sample
-
-print("Generating...")
-model.eval()
-for prompt in ["The meaning of life is", "def fibonacci(n):"]:
-    ids = tok.encode(prompt).ids[:10]
-    gen = ids[:]
-    for _ in range(100):
-        inp = torch.tensor([gen[-SEQ:]], device=device)
-        logits = model(inp)[0, -1, :]
-        gen.append(sample(logits).item())
-    text = tok.decode(gen).replace("\u0120", " ").replace("\u010a", "\n")
-    print(f"\nPrompt: {prompt}\n{text[:300]}")
-print("Done.")

@@ -1,5 +1,6 @@
+# DEPRECATED ¡ª legacy TemporalSNN architecture, use rina.mohe.MoHE instead
 """
-NIAH data generator â€” realistic key-value insertion into natural text.
+NIAH data generator â€?realistic key-value insertion into natural text.
 Inspired by RULER (Needle-in-a-Haystack evaluation framework).
 """
 import random

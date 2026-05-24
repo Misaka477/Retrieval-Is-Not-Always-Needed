@@ -1,5 +1,6 @@
+# DEPRECATED ¡ª legacy TemporalSNN architecture, use rina.mohe.MoHE instead
 """
-Basin drift tracker â€” measure pattern stability during training.
+Basin drift tracker â€?measure pattern stability during training.
 Pattern drift = ||P_epoch - P_previous|| / ||P_previous||
 Converged when drift < threshold (e.g. 1%).
 

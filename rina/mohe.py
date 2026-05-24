@@ -5,19 +5,14 @@ import torch, torch.nn as nn
 
 CONV_THRESH = 0.05
 LR = 1e-4
-INHIBIT_LR = 0.1
+HEBB_LR = 0.05
+INHIBIT_LR = 0.5
 
 try:
-    import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from rina.kernels import fused_all_experts as _fused_all_experts
+    from rina.kernels import FusedLightFunction as _FusedLightFunction
+    _use_light = True
 except Exception:
-    _fused_all_experts = None
-
-try:
-    from rina.kernels.train import FusedExpertFunction as _FEF, pack_weights as _pack_weights
-    _train_fuse = True
-except Exception:
-    _train_fuse = False
+    _use_light = False
 
 
 class ExpertCell(nn.Module):
@@ -25,8 +20,8 @@ class ExpertCell(nn.Module):
     def __init__(self, dm, np_, name=""):
         super().__init__()
         self.name = name
-        self.gate_a = nn.Linear(dm * 2, dm)
-        self.gate_b = nn.Linear(dm * 2, dm)
+        self.gate_a = nn.Linear(dm, dm)
+        self.gate_b = nn.Linear(dm, dm)
         self.proj_in = nn.Linear(dm, dm)
         self.slow_gate = nn.Linear(dm * 2, 1)
         self.field_mix = nn.Linear(dm, dm)
@@ -34,17 +29,20 @@ class ExpertCell(nn.Module):
         self.patterns = nn.Parameter(torch.randn(np_, dm) * 0.02)
 
     def forward(self, h, x_emb):
-        combined = torch.cat([h, x_emb], dim=-1)
-        a = torch.sigmoid(self.gate_a(combined))
-        b = torch.sigmoid(self.gate_b(combined))
+        a = torch.sigmoid(self.gate_a(x_emb))
+        b = torch.sigmoid(self.gate_b(x_emb))
         xp = self.proj_in(x_emb)
         h_fast = a * h + b * xp
+        return self._attract(h, h_fast, x_emb), h_fast
+
+    def _attract(self, h, h_fast, x_emb):
+        """Attractor path only (gate_a/b already computed)."""
         P = self.patterns.T @ self.patterns
         field = h_fast @ P
         field = self.field_mix(field)
         field = self.norm(field)
-        gate = torch.sigmoid(self.slow_gate(combined))
-        return h_fast + gate * field * 0.1, h_fast
+        gate = torch.sigmoid(self.slow_gate(torch.cat([h, x_emb], dim=-1)))
+        return h_fast + gate * field * 0.1
 
 
 class MoHE(nn.Module):
@@ -54,13 +52,13 @@ class MoHE(nn.Module):
         self.embed = nn.Embedding(vocab, dm)
         self.embed.weight.data.normal_(0, 0.05)
         self.embed_norm = nn.LayerNorm(dm)
-        self.head = nn.Linear(dm, vocab)
-        self.head.weight.data.normal_(0, 0.001)
+        self.head = nn.Linear(dm, vocab, bias=True)
+        self.head.weight = self.embed.weight
         self.head.bias.data.fill_(-10.8)
         self.head_bias = -10.8
         self.state_norm = nn.LayerNorm(dm)
 
-        self.router = nn.Linear(dm * 2, n_experts)
+        self.router = nn.Linear(dm, n_experts)
         self.experts = nn.ModuleList([
             ExpertCell(dm, np_, name=f"exp_{i}") for i in range(n_experts)
         ])
@@ -68,10 +66,8 @@ class MoHE(nn.Module):
         self.consolidate_norm = nn.LayerNorm(dm)
 
         self.register_buffer("prev_route", torch.zeros(4))
-        self.inertia = 0.7
+        self.inertia = 0.4
         self.loser_inhibit = INHIBIT_LR
-        self._packed_weights = None
-        self._packed_P = None
 
     def forward(self, x, max_depth=1):
         bsz, seq_len = x.shape
@@ -79,40 +75,64 @@ class MoHE(nn.Module):
         emb = self.embed_norm(self.embed(x))
         h = torch.zeros(bsz, dm, device=x.device)
         h_seq = []
+        self._conv_total = 0
+        self._conv_hits = 0
+        self._cap_fired = 0
+        route_logits = []
 
-        if self.training and _train_fuse:
-            gw, gb, fw, fb, pw_, pb_, _, fmw, fmb, nw, nb, sw, sb = _pack_weights(self)
+        # Batch gate precomputation for entire sequence
+        a_stacked = torch.stack([torch.sigmoid(exp.gate_a(emb)) for exp in self.experts])
+        b_stacked = torch.stack([torch.sigmoid(exp.gate_b(emb)) for exp in self.experts])
+        xp_stacked = torch.stack([exp.proj_in(emb) for exp in self.experts])
+        if self.training and _use_light:
+            fmw = torch.stack([e.field_mix.weight for e in self.experts])
+            fmb = torch.stack([e.field_mix.bias for e in self.experts])
+            nw = torch.stack([e.norm.weight for e in self.experts])
+            nb = torch.stack([e.norm.bias for e in self.experts])
+            sw = torch.stack([e.slow_gate.weight.squeeze(0) for e in self.experts])
+            sb = torch.stack([e.slow_gate.bias.squeeze(0) for e in self.experts])
         for t in range(seq_len):
             x_emb = emb[:, t, :]
             self.prev_route.zero_()
             h_prev = h
-            if self.training and _train_fuse:
+            if self.training and _use_light:
                 P = torch.stack([e.patterns.T @ e.patterns for e in self.experts])
 
             for depth in range(max_depth):
-                combined = torch.cat([h, x_emb], dim=-1)
+                self._conv_total += 1
 
-                route_raw = self.router(combined)
+                route_raw = self.router(x_emb)
+                route_logits.append(route_raw)
                 route_smooth = self.inertia * self.prev_route + (1 - self.inertia) * route_raw
                 route_weights = torch.softmax(route_smooth, dim=-1)
+                if self.training:
+                    usage_ratio = route_weights.max(-1).values / route_weights.min(-1).values.clamp(min=1e-10)
+                    if usage_ratio.median() > 10:
+                        self._cap_fired += 1
+                self._last_route_entropy = -(route_weights * torch.log(route_weights.clamp(min=1e-10))).sum(-1).mean().item()
                 self.prev_route = route_weights.detach()
 
                 h_exps = []
                 h_fasts = []
-                if self.training and _train_fuse:
-                    h_out_pk, h_fast_pk = _FEF.apply(
-                        h, x_emb, gw, gb, fw, fb, pw_, pb_, P, fmw, fmb, nw, nb, sw, sb)
+                if self.training and _use_light:
+                    h_fast = (a_stacked[:, :, t, :] * h.unsqueeze(0) +
+                              b_stacked[:, :, t, :] * xp_stacked[:, :, t, :])
+                    h_out_pk, _ = _FusedLightFunction.apply(
+                        h_fast, h, x_emb, P, fmw, fmb, nw, nb, sw, sb)
                     h_exps = [h_out_pk[i] for i in range(len(self.experts))]
-                    h_fasts = [h_fast_pk[i] for i in range(len(self.experts))]
+                    h_fasts = [h_fast[i] for i in range(len(self.experts))]
                 else:
-                    h_out_packed, h_fast_packed = _fused_all_experts(h, x_emb, self)
-                    h_exps = [h_out_packed[i] for i in range(len(self.experts))]
-                    h_fasts = [h_fast_packed[i] for i in range(len(self.experts))]
+                    for i, exp in enumerate(self.experts):
+                        h_fast_t = a_stacked[i, :, t, :] * h + b_stacked[i, :, t, :] * xp_stacked[i, :, t, :]
+                        h_out = exp._attract(h, h_fast_t, x_emb)
+                        h_exps.append(h_out)
+                        h_fasts.append(h_fast_t)
 
                 h_stack = torch.cat(h_exps, dim=-1)
                 h_new = self.consolidate_norm(self.consolidate(h_stack))
 
                 if depth > 0 and (h_new - h_prev).norm().item() / (h_prev.norm().item() + 1e-8) < CONV_THRESH:
+                    self._conv_hits += 1
                     break
                 h_prev = h_new
                 h = h_new
@@ -120,30 +140,57 @@ class MoHE(nn.Module):
             if self.training:
                 winner_idx = route_weights.argmax(dim=-1)
                 h = torch.nan_to_num(h)
+                hf_stack = torch.stack(h_fasts)
+                # Winner's h_fast for each batch element (used in loser push)
+                winner_hf_all = hf_stack[winner_idx, torch.arange(bsz, device=h.device)]
 
                 for i, expert in enumerate(self.experts):
+                    # ── Winner update ──
                     mask = winner_idx == i
-                    if mask.any():
-                        h_target = torch.nan_to_num(h[mask])
-                        h_fast_i = torch.nan_to_num(h_fasts[i][mask])
-                        with torch.no_grad():
-                            diff = (h_fast_i - h_target).norm(dim=-1) / (h_target.norm(dim=-1) + 1e-8)
-                            scores = h_target.unsqueeze(1) @ expert.patterns.T.unsqueeze(0)
-                            k = scores.squeeze(1).argmax(dim=-1)
-                            delta = h_target - expert.patterns[k]
-                            expert.patterns.data.index_add_(0, k,
-                                LR / (1 + diff.unsqueeze(-1)) * delta)
-                    else:
-                        winner_h = torch.nan_to_num(h[winner_idx != i])
-                        if len(winner_h) > 0:
-                            with torch.no_grad():
-                                scores = winner_h.unsqueeze(1) @ expert.patterns.T.unsqueeze(0)
-                                k = scores.squeeze(1).argmax(dim=-1)
-                                delta = winner_h - expert.patterns[k]
-                                expert.patterns.data.index_add_(0, k,
-                                    -self.loser_inhibit * LR * delta)
+                    h_win = h_fasts[i][mask]
+                    if h_win.numel() == 0: continue
+                    with torch.no_grad():
+                        k = (h_win @ expert.patterns.T).argmax(dim=-1)
+                        delta = h_win - expert.patterns[k]
+                        expert.patterns.data.index_add_(0, k, HEBB_LR * delta)
+
+                    # ── Loser update ──
+                    loser_mask = winner_idx != i
+                    h_lose = winner_hf_all[loser_mask]
+                    if h_lose.numel() == 0: continue
+                    with torch.no_grad():
+                        k = (h_lose @ expert.patterns.T).argmax(dim=-1)
+                        delta = h_lose - expert.patterns[k]
+                        expert.patterns.data.index_add_(0, k,
+                            -self.loser_inhibit * HEBB_LR * delta)
 
             h_seq.append(h)
+
+        if self.training:
+            with torch.no_grad():
+                for exp in self.experts:
+                    norms = exp.patterns.data.norm(dim=1, keepdim=True)
+                    exp.patterns.data.div_(norms.clamp(min=1e-8))
+
+        self._conv_rate = self._conv_hits / max(self._conv_total, 1)
+        self._cap_rate = self._cap_fired / max(len(route_logits), 1)
+
+        if self.training and route_logits:
+            logits_stack = torch.stack(route_logits)  # [T*B, ne]
+            logits_flat = logits_stack.view(-1, len(self.experts))
+            p = torch.softmax(logits_flat, dim=-1)
+            f = torch.zeros(len(self.experts), device=logits_flat.device)
+            for i in range(len(self.experts)):
+                f[i] = (logits_flat.argmax(-1) == i).float().mean()
+            aux_loss = 0.1 * len(self.experts) * (f * p.mean(0)).sum()
+            cap_penalty = 1.0 * (p.mean(0) - 0.6).clamp(min=0).pow(2).sum()
+            aux_loss = aux_loss + cap_penalty
+            log_z = logits_flat.logsumexp(-1)
+            z_loss = (log_z ** 2).mean() * 1e-4
+            self._last_aux_loss = aux_loss + z_loss
+            self._gate_ratio = (p.max(-1).values / p.min(-1).values.clamp(min=1e-10)).median().item()
+        else:
+            self._last_aux_loss = 0.0
 
         # Batched head: [bs, seq, dm] → [bs*seq, dm] → head → [bs*seq, vocab] → [bs, seq, vocab]
         h_flat = torch.stack(h_seq, dim=1).reshape(-1, dm)
@@ -151,9 +198,4 @@ class MoHE(nn.Module):
         return logits.reshape(bsz, seq_len, -1)
 
     def finish_training_step(self):
-        """Call after loss.backward() to compute expert parameter gradients."""
-        if _train_fuse:
-            from rina.kernels.train import compute_param_grads, apply_param_grads
-            grads = compute_param_grads()
-            if grads is not None:
-                apply_param_grads(self, grads)
+        """No-op: all gradients flow through autograd automatically."""
