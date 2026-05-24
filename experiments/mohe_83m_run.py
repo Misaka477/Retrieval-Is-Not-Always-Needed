@@ -18,7 +18,7 @@ VOCAB, DM, NP = 50257, 1024, 512
 SEQ, BS = 128, 8
 LR = 1e-4; EPOCHS = 2
 SUBSAMPLE = 8; MAX_TOKENS = 200_000_000
-MAX_DEPTH = 1
+MAX_DEPTH = 3
 CKPT_DIR = "../checkpoints"; CKPT_NAME = "mohe_83m"
 os.makedirs(os.path.join(os.path.dirname(os.path.abspath(__file__)), CKPT_DIR), exist_ok=True)
 
@@ -86,7 +86,8 @@ ids = ids[perm]
 nb = (len(ids) - 1) // (BS * SEQ)
 print(f"  total: {len(ids):,} tokens, {nb} batches/epoch")
 
-model = MoHE(VOCAB, DM, NP, n_experts=4).to(device)
+model = MoHE(VOCAB, DM, NP, n_experts=4,
+             aux_loss_weight=0.5, route_noise=0.1, expert_dropout=0.1).to(device)
 n = sum(p.numel() for p in model.parameters())
 print(f"Params: {n/1e6:.2f}M")
 opt = torch.optim.AdamW(model.parameters(), lr=LR)

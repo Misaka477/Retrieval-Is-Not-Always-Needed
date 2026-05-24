@@ -47,8 +47,12 @@ class ExpertCell(nn.Module):
 
 class MoHE(nn.Module):
     """Multi-layer MoHE with Depth-of-Thought."""
-    def __init__(self, vocab, dm, np_, n_experts=4):
+    def __init__(self, vocab, dm, np_, n_experts=4, aux_loss_weight=0.1,
+                 route_noise=0.0, expert_dropout=0.0):
         super().__init__()
+        self.aux_loss_weight = aux_loss_weight
+        self.route_noise = route_noise
+        self.expert_dropout = expert_dropout
         self.embed = nn.Embedding(vocab, dm)
         self.embed.weight.data.normal_(0, 0.05)
         self.embed_norm = nn.LayerNorm(dm)
@@ -65,7 +69,7 @@ class MoHE(nn.Module):
         self.consolidate = nn.Linear(dm * n_experts, dm)
         self.consolidate_norm = nn.LayerNorm(dm)
 
-        self.register_buffer("prev_route", torch.zeros(4))
+        self.register_buffer("prev_route", torch.zeros(n_experts))
         self.inertia = 0.4
         self.loser_inhibit = INHIBIT_LR
 
@@ -102,6 +106,8 @@ class MoHE(nn.Module):
                 self._conv_total += 1
 
                 route_raw = self.router(x_emb)
+                if self.training and self.route_noise > 0:
+                    route_raw = route_raw + torch.randn_like(route_raw) * self.route_noise
                 route_logits.append(route_raw)
                 route_smooth = self.inertia * self.prev_route + (1 - self.inertia) * route_raw
                 route_weights = torch.softmax(route_smooth, dim=-1)
@@ -127,6 +133,11 @@ class MoHE(nn.Module):
                         h_out = exp._attract(h, h_fast_t, x_emb)
                         h_exps.append(h_out)
                         h_fasts.append(h_fast_t)
+
+                if self.training and self.expert_dropout > 0:
+                    keep = torch.bernoulli(torch.full((len(self.experts),),
+                        1 - self.expert_dropout, device=h.device)).unsqueeze(1).unsqueeze(2)
+                    h_exps = [h * k for h, k in zip(h_exps, keep)]
 
                 h_stack = torch.cat(h_exps, dim=-1)
                 h_new = self.consolidate_norm(self.consolidate(h_stack))
@@ -182,7 +193,7 @@ class MoHE(nn.Module):
             f = torch.zeros(len(self.experts), device=logits_flat.device)
             for i in range(len(self.experts)):
                 f[i] = (logits_flat.argmax(-1) == i).float().mean()
-            aux_loss = 0.1 * len(self.experts) * (f * p.mean(0)).sum()
+            aux_loss = self.aux_loss_weight * len(self.experts) * (f * p.mean(0)).sum()
             cap_penalty = 1.0 * (p.mean(0) - 0.6).clamp(min=0).pow(2).sum()
             aux_loss = aux_loss + cap_penalty
             log_z = logits_flat.logsumexp(-1)

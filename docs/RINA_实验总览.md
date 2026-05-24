@@ -438,3 +438,74 @@ MoHE 核心参数 2.4M 训 200M tokens 后仍在下降，不符合标准 RNN/LST
 - 完成 ep2 (depth=2) 和 ep3，看 ppL 是否继续下降
 - 与同核心参数量（2.4M）的传统模型直接对比 ppL
 - 如果 MoHE 2.4M 在 3 ep（600M tokens）后 ppL 达到 1500-2000 区间，则证明参数量效率显著超越缩放定律预测
+
+---
+
+## 9. MoHE 83M + K3 Light Kernel（2026-05-25）
+
+### 9.1 83M 模型配置
+
+从 28M 扩展到 83M（DM=1024, NP=512, NE=4, weight tying, SEQ=128），参数量释放：
+
+| 组件 | 参数量 | 占比 |
+|------|--------|------|
+| Embedding + Head | 51.5M | 69% |
+| 4 x Expert + Consolidation + Router | **23.1M** | **31%** |
+
+核心参数占比从 28M 的 9% 提升到 31%，核心/词表比显著改善。
+
+### 9.2 K3 Light Kernel
+
+v3 的 K3 fused forward 包含完整的 S5-style 门控递推（gate_a/b + proj_in）→ 计算量大且需要保存 9 个中间 tensor 给 backward。K3 Light 将计算拆为两步：
+
+1. **PyTorch batch gates：** 所有位置×所有 expert 的 gate_a/b 一次 matmul 完成
+2. **FusedLightFunction（attractor only）：** 以 h_fast = a·h + b·x 为输入 → field → field_mix → LN → slow_gate → h_out
+
+收益：
+
+| 指标 | 旧 K3 | K3 Light | 收益 |
+|------|-------|----------|------|
+| 每步时间 | ~5.89s | ~2.95s | **~2×** |
+| 训练逻辑 | 手动 grad 管理 | 纯 autograd | 简洁 |
+
+`finish_training_step()` 变为 no-op，删除 `rina/kernels/train.py`。
+
+### 9.3 关键 Bug 修复
+
+| Bug | 位置 | 影响 |
+|-----|------|------|
+| field_mix shared memory 竞争 | 所有 forward kernel | 输出非确定且错误 |
+| LN 写 shared memory 竞争 | 所有 forward kernel | 同上 |
+| Gate bias 被 256 个线程重复累加 | 所有 forward kernel | gate 恒为 0 或 1，sigmoid 饱和 |
+
+三个 bug 存在于所有历史 kernel（K3、K3 Light、训练 kernel）中，此次一并修复。
+
+### 9.4 depth=1 训练结果
+
+28M 到 83M，200M tokens，MAX_DEPTH=1：
+
+```
+step    loss   ppl      exp_sim
+───────────────────────────────
+  200   8.40   18650     0.80
+  400   8.23    8512     0.88
+  800   8.20    5530     0.90
+ 1400   8.01    4523     0.90
+ 2000   8.08    4155     0.91
+ 2800   8.10    3911     0.91
+```
+
+**核心发现：** depth=1 时 4 个专家全面趋同（exp_sim 0.80 → 0.91），路由始终均匀（entropy ≈ max 1.386）。loss 从 step 1000 起平在 ~8.1，不再下降。
+
+**根因：** 没有 depth 迭代，每个 token 只经过一层 expert。4 个专家输入相同 → 路由均匀 → Hebbian 的 push/pull 互相抵消 → 继续趋同。
+
+### 9.5 depth=3 + 分化增强
+
+| 措施 | 参数 | 目标 |
+|------|------|------|
+| Router noise | σ=0.1 | 强制不均匀路由分配 |
+| Expert dropout | p=0.1 | 迫使 consolidate 不依赖特定专家 |
+| Aux loss weight | 0.5 → (原 0.1) | 更强惩罚均匀路由 |
+| MAX_DEPTH | 1 → 3 | 迭代计算让专家差异化分工 |
+
+**正在运行中。**
