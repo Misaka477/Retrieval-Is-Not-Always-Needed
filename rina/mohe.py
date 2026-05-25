@@ -72,7 +72,7 @@ class MoHE(nn.Module):
         self.topk = topk
         self.router_bias = nn.Parameter(torch.zeros(n_experts))
         self.expert_norm = nn.LayerNorm(dm)
-        self.bias_lr = 0.01
+        self.bias_lr = 0.2
         self.register_buffer("_batch_counts", torch.zeros(n_experts))
         self.register_buffer("_batch_total", torch.zeros(1))
         self.register_buffer("prev_route", torch.zeros(n_experts))
@@ -89,6 +89,9 @@ class MoHE(nn.Module):
         self._conv_hits = 0
         self._cap_fired = 0
         route_logits = []
+        self._router_qloss = 0.0
+        self._diversity_loss = 0.0
+        self._loss_count = 0
 
         # Batch gate precomputation for entire sequence
         a_stacked = torch.stack([torch.sigmoid(exp.gate_a(emb)) for exp in self.experts])
@@ -155,6 +158,17 @@ class MoHE(nn.Module):
                 h_stack = torch.cat(h_exps, dim=-1)
                 h_new = self.consolidate_norm(self.consolidate(h_stack))
 
+                if self.training:
+                    h_stack_exps = torch.stack(h_exps)
+                    with torch.no_grad():
+                        err = (h_stack_exps - h_new.unsqueeze(0)).norm(dim=-1)
+                        target = (-err).softmax(dim=0).T
+                    log_prob = route_raw.log_softmax(-1)
+                    self._router_qloss += -(target * log_prob).sum(-1).mean()
+                    h_avg = h_stack_exps.mean(dim=0, keepdim=True)
+                    self._diversity_loss += -((h_stack_exps - h_avg) ** 2).mean()
+                    self._loss_count += 1
+
                 if depth > 0 and (h_new - h_prev).norm().item() / (h_prev.norm().item() + 1e-8) < CONV_THRESH:
                     self._conv_hits += 1
                     break
@@ -212,6 +226,10 @@ class MoHE(nn.Module):
             log_z = logits_flat.logsumexp(-1)
             z_loss = (log_z ** 2).mean() * 1e-4
             self._last_aux_loss = aux_loss + z_loss
+            if self._loss_count > 0:
+                self._router_qloss /= self._loss_count
+                self._diversity_loss /= self._loss_count
+                self._last_aux_loss += self._router_qloss * 0.1 + self._diversity_loss * 0.5
             self._gate_ratio = (p.max(-1).values / p.min(-1).values.clamp(min=1e-10)).median().item()
             # Router bias adjustment
             for e in range(len(self.experts)):
