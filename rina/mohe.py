@@ -229,7 +229,8 @@ class MoHE(nn.Module):
             if self._loss_count > 0:
                 self._router_qloss /= self._loss_count
                 self._diversity_loss /= self._loss_count
-                self._last_aux_loss += self._router_qloss * 0.1 + self._diversity_loss * 0.5
+                aux_total = self._router_qloss * 0.1 + self._diversity_loss * 0.5
+                self._last_aux_loss += max(0.0, aux_total)
             self._gate_ratio = (p.max(-1).values / p.min(-1).values.clamp(min=1e-10)).median().item()
             # Router bias adjustment
             for e in range(len(self.experts)):
