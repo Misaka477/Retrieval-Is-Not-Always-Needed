@@ -77,6 +77,7 @@ class MoHE(nn.Module):
         self._diversity_weight = 0.4
         self.register_buffer("_batch_counts", torch.zeros(n_experts))
         self.register_buffer("_batch_total", torch.zeros(1))
+        self.register_buffer("_aux_step", torch.zeros(1, dtype=torch.long))
         self.register_buffer("prev_route", torch.zeros(n_experts))
         self.inertia = 0.4
         self.loser_inhibit = INHIBIT_LR
@@ -231,7 +232,9 @@ class MoHE(nn.Module):
             f = torch.zeros(len(self.experts), device=logits_flat.device)
             for i in range(len(self.experts)):
                 f[i] = (logits_flat.argmax(-1) == i).float().mean()
-            aux_loss = self.aux_loss_weight * len(self.experts) * (f * p.mean(0)).sum()
+            step = self._aux_step.item()
+            decay = max(0.0, 1.0 - max(0, step - 2000) / 6000) if step >= 2000 else 1.0
+            aux_loss = self.aux_loss_weight * decay * len(self.experts) * (f * p.mean(0)).sum()
             cap_penalty = 1.0 * (p.mean(0) - 0.6).clamp(min=0).pow(2).sum()
             aux_loss = aux_loss + cap_penalty
             log_z = logits_flat.logsumexp(-1)
@@ -262,4 +265,5 @@ class MoHE(nn.Module):
         return logits.reshape(bsz, seq_len, -1)
 
     def finish_training_step(self):
-        """No-op: expert capacity handles routing balance."""
+        """Increment aux_loss decay counter."""
+        self._aux_step += 1
