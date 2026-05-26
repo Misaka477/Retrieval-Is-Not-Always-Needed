@@ -72,7 +72,7 @@ class MoHE(nn.Module):
         self.topk = topk
         self.router_bias = nn.Parameter(torch.zeros(n_experts))
         self.expert_norm = nn.LayerNorm(dm)
-        self.bias_lr = 0.2
+        self.bias_lr = 1.0
         self.register_buffer("_batch_counts", torch.zeros(n_experts))
         self.register_buffer("_batch_total", torch.zeros(1))
         self.register_buffer("prev_route", torch.zeros(n_experts))
