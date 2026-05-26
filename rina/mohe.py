@@ -74,8 +74,8 @@ class MoHE(nn.Module):
         self.expert_norm = nn.LayerNorm(dm)
         self._bias_lr = 1.0
         self._diversity_weight = 0.4
-        self._last_exp_sim = 0.5
-        self._last_gate_ratio = 1.0
+        self._last_exp_sim = 0.25
+        self._last_gate_ratio = 8.0
         self.register_buffer("_batch_counts", torch.zeros(n_experts))
         self.register_buffer("_batch_total", torch.zeros(1))
         self.register_buffer("prev_route", torch.zeros(n_experts))
@@ -246,7 +246,7 @@ class MoHE(nn.Module):
             # Adaptive bias_lr: push harder when routing gets extreme
             target_gap = 8.0
             excess = max(0, self._last_gate_ratio - target_gap)
-            self._bias_lr = min(5.0, 0.1 + excess * 0.08)
+            self._bias_lr = min(5.0, 0.2 + excess * 0.08)
             # Router bias adjustment
             for e in range(len(self.experts)):
                 count = (logits_flat.argmax(-1) == e).float().sum().item()
