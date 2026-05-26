@@ -236,7 +236,8 @@ class MoHE(nn.Module):
             aux_loss = aux_loss + cap_penalty
             log_z = logits_flat.logsumexp(-1)
             z_loss = (log_z ** 2).mean() * 1e-4
-            self._last_aux_loss = aux_loss + z_loss
+            router_z_loss = 1e-3 * (logits_flat ** 2).mean()
+            self._last_aux_loss = aux_loss + z_loss + router_z_loss
             if self._loss_count > 0:
                 self._router_qloss /= self._loss_count
                 self._diversity_loss /= self._loss_count
