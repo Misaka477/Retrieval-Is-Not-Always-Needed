@@ -251,9 +251,10 @@ class MoHE(nn.Module):
         return logits.reshape(bsz, seq_len, -1)
 
     def finish_training_step(self):
-        """Periodically reset router bias and add noise to router weights to prevent routing collapse."""
+        """Reset router when routing gets extreme (gate_ratio > 15, min 500 steps between resets)."""
         self._step_counter = getattr(self, '_step_counter', 0) + 1
-        if self._step_counter >= 2000:
+        gr = getattr(self, '_gate_ratio', 0)
+        if self._step_counter >= 500 and gr > 15:
             self._step_counter = 0
             with torch.no_grad():
                 self.router.weight += torch.randn_like(self.router.weight) * 0.02
