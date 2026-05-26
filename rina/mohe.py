@@ -257,6 +257,6 @@ class MoHE(nn.Module):
         if self._step_counter >= 500 and gr > 15:
             self._step_counter = 0
             with torch.no_grad():
-                noise_scale = 0.02 * min(max(gr, 1) / 10, 5.0)
+                noise_scale = 0.02 * min(max(gr, 1) / 10, 10.0)
                 self.router.weight += torch.randn_like(self.router.weight) * noise_scale
                 self.router_bias.zero_()
