@@ -70,6 +70,7 @@ class MoHE(nn.Module):
         self.consolidate_norm = nn.LayerNorm(dm)
 
         self.topk = topk
+        self.expert_capacity = 1.25
         self.router_bias = nn.Parameter(torch.zeros(n_experts))
         self.expert_norm = nn.LayerNorm(dm)
         self._bias_lr = 1.0
@@ -155,6 +156,15 @@ class MoHE(nn.Module):
                     _, indices = route_weights.topk(self.topk, dim=-1)
                     mask = torch.zeros_like(route_weights).scatter_(1, indices, 1)
                     h_exps = [h * mask[:, i:i+1] for i, h in enumerate(h_exps)]
+
+                if self.training and self.expert_capacity > 0:
+                    cap = int(bsz * self.expert_capacity)
+                    for i, h in enumerate(h_exps):
+                        active = (h.abs().sum(dim=-1) > 0).float()
+                        cnt = int(active.sum().item())
+                        if cnt > cap:
+                            drop = torch.where(active > 0)[0][torch.randperm(cnt)[:cnt - cap]]
+                            h_exps[i][drop] = 0
 
                 h_stack = torch.cat(h_exps, dim=-1)
                 h_new = self.consolidate_norm(self.consolidate(h_stack))
@@ -251,13 +261,4 @@ class MoHE(nn.Module):
         return logits.reshape(bsz, seq_len, -1)
 
     def finish_training_step(self):
-        """Reset router when routing gets extreme (gate_ratio > 15, min 500 steps between resets)."""
-        self._step_counter = getattr(self, '_step_counter', 500) + 1
-        gr = getattr(self, '_gate_ratio', 0)
-        if self._step_counter >= 500 and gr > 15:
-            self._step_counter = 0
-            with torch.no_grad():
-                self.router.weight.data *= 0.3 if gr > 15 else 0.8
-                noise_scale = 0.04 * min(max(gr, 1) / 10, 10.0)
-                self.router.weight += torch.randn_like(self.router.weight) * noise_scale
-                self.router_bias.zero_()
+        """No-op: expert capacity handles routing balance."""
