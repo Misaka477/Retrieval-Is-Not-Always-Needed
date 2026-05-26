@@ -233,11 +233,6 @@ class MoHE(nn.Module):
                 aux_total = self._router_qloss * 0.1 + self._diversity_loss * 0.4
                 self._last_aux_loss += max(0.0, aux_total)
             self._gate_ratio = (p.max(-1).values / p.min(-1).values.clamp(min=1e-10)).median().item()
-            # Gate ratio penalty: bias_lr boost when routing gets extreme (no gradient)
-            if self._gate_ratio > 15:
-                self._bias_lr = min(5.0, self._bias_lr + 0.5 * (self._gate_ratio - 15) / 15)
-            else:
-                self._bias_lr = max(0.5, self._bias_lr - 0.1)
             # Router bias adjustment
             for e in range(len(self.experts)):
                 count = (logits_flat.argmax(-1) == e).float().sum().item()
