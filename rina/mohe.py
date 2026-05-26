@@ -232,9 +232,9 @@ class MoHE(nn.Module):
                 self._diversity_loss /= self._loss_count
                 aux_total = self._router_qloss * 0.1 + self._diversity_loss * 0.4
                 self._last_aux_loss += max(0.0, aux_total)
-            self._last_gate_ratio = (p.max(-1).values / p.min(-1).values.clamp(min=1e-10)).median().item()
+            self._gate_ratio = (p.max(-1).values / p.min(-1).values.clamp(min=1e-10)).median().item()
             # Gate ratio penalty: quadratically discourage extreme routing
-            gr = self._last_gate_ratio if self._last_gate_ratio > 1 else 0
+            gr = self._gate_ratio if self._gate_ratio > 1 else 0
             self._gate_penalty = 0.1 * max(0, gr - 12) ** 2
             self._last_aux_loss += self._gate_penalty
             # Router bias adjustment
