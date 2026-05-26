@@ -74,8 +74,6 @@ class MoHE(nn.Module):
         self.expert_norm = nn.LayerNorm(dm)
         self._bias_lr = 1.0
         self._diversity_weight = 0.4
-        self._last_exp_sim = 0.25
-        self._last_gate_ratio = 8.0
         self.register_buffer("_batch_counts", torch.zeros(n_experts))
         self.register_buffer("_batch_total", torch.zeros(1))
         self.register_buffer("prev_route", torch.zeros(n_experts))
@@ -232,21 +230,12 @@ class MoHE(nn.Module):
             if self._loss_count > 0:
                 self._router_qloss /= self._loss_count
                 self._diversity_loss /= self._loss_count
-                aux_total = self._router_qloss * 0.1 + self._diversity_loss * self._diversity_weight
+                aux_total = self._router_qloss * 0.1 + self._diversity_loss * 0.4
                 self._last_aux_loss += max(0.0, aux_total)
             self._last_gate_ratio = (p.max(-1).values / p.min(-1).values.clamp(min=1e-10)).median().item()
-            with torch.no_grad():
-                pts = [e.patterns for e in self.experts]
-                sims = [(pts[i] @ pts[j].T).mean().item() for i in range(len(self.experts)) for j in range(i+1, len(self.experts))]
-                self._last_exp_sim = sum(sims) / len(sims) if sims else 0.0
-            # Adaptive diversity: push harder when experts converge
-            target_sim = 0.40
-            excess = max(0, self._last_exp_sim - target_sim)
-            self._diversity_weight = min(1.0, 0.15 + excess * 5.0)
-            # Adaptive bias_lr: push harder when routing gets extreme
-            target_gap = 8.0
-            excess = max(0, self._last_gate_ratio - target_gap)
-            self._bias_lr = min(5.0, 0.2 + excess * 0.08)
+            # Gate ratio penalty: quadratically discourage extreme routing
+            self._gate_penalty = 0.1 * max(0, self._last_gate_ratio - 12) ** 2
+            self._last_aux_loss += self._gate_penalty
             # Router bias adjustment
             for e in range(len(self.experts)):
                 count = (logits_flat.argmax(-1) == e).float().sum().item()
@@ -255,7 +244,7 @@ class MoHE(nn.Module):
                     self.router_bias.data[e] -= self._bias_lr
                 elif count < target:
                     self.router_bias.data[e] += self._bias_lr
-            self.router_bias.data.clamp_(-5, 5)
+            self.router_bias.data.clamp_(-2, 2)
         else:
             self._last_aux_loss = 0.0
 
