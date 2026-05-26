@@ -234,7 +234,8 @@ class MoHE(nn.Module):
                 self._last_aux_loss += max(0.0, aux_total)
             self._last_gate_ratio = (p.max(-1).values / p.min(-1).values.clamp(min=1e-10)).median().item()
             # Gate ratio penalty: quadratically discourage extreme routing
-            self._gate_penalty = 0.1 * max(0, self._last_gate_ratio - 12) ** 2
+            gr = self._last_gate_ratio if self._last_gate_ratio > 1 else 0
+            self._gate_penalty = 0.1 * max(0, gr - 12) ** 2
             self._last_aux_loss += self._gate_penalty
             # Router bias adjustment
             for e in range(len(self.experts)):
