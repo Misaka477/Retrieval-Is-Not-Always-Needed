@@ -252,7 +252,7 @@ class MoHE(nn.Module):
 
     def finish_training_step(self):
         """Reset router when routing gets extreme (gate_ratio > 15, min 500 steps between resets)."""
-        self._step_counter = getattr(self, '_step_counter', 0) + 1
+        self._step_counter = getattr(self, '_step_counter', 500) + 1
         gr = getattr(self, '_gate_ratio', 0)
         if self._step_counter >= 500 and gr > 15:
             self._step_counter = 0
