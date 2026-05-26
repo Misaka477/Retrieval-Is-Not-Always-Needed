@@ -251,4 +251,10 @@ class MoHE(nn.Module):
         return logits.reshape(bsz, seq_len, -1)
 
     def finish_training_step(self):
-        """No-op: all gradients flow through autograd automatically."""
+        """Periodically reset router bias and add noise to router weights to prevent routing collapse."""
+        self._step_counter = getattr(self, '_step_counter', 0) + 1
+        if self._step_counter >= 2000:
+            self._step_counter = 0
+            with torch.no_grad():
+                self.router.weight += torch.randn_like(self.router.weight) * 0.02
+                self.router_bias.zero_()
