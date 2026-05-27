@@ -91,7 +91,8 @@ model = MoHE(VOCAB, DM, NP, n_experts=4,
 n = sum(p.numel() for p in model.parameters())
 print(f"Params: {n/1e6:.2f}M")
 head_lr = LR * 3
-other_params = [p for n, p in model.named_parameters() if not n.startswith("head.")]
+head_param_names = {id(p) for p in model.head.parameters()}
+other_params = [p for n, p in model.named_parameters() if id(p) not in head_param_names]
 head_params = list(model.head.parameters())
 opt = torch.optim.AdamW([
     {"params": other_params, "lr": LR},
