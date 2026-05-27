@@ -131,14 +131,16 @@ class MoHE(nn.Module):
                 h_exps = []
                 h_fasts = []
                 if self.training and _use_light:
-                    h_fast = h.unsqueeze(0) + xp_stacked[:, :, t, :]
+                    a = torch.stack([torch.sigmoid(exp.gate_a(h)) for exp in self.experts])
+                    b = torch.stack([torch.sigmoid(exp.gate_b(h)) for exp in self.experts])
+                    h_fast = a * h.unsqueeze(0) + b * xp_stacked[:, :, t, :]
                     h_out_pk, _ = _FusedLightFunction.apply(
                         h_fast, h, x_emb, P, fmw, fmb, nw, nb, sw, sb)
                     h_exps = [h_out_pk[i] for i in range(len(self.experts))]
                     h_fasts = [h_fast[i] for i in range(len(self.experts))]
                 else:
                     for i, exp in enumerate(self.experts):
-                        h_fast_t = h + xp_stacked[i, :, t, :]
+                        h_fast_t = torch.sigmoid(exp.gate_a(h)) * h + torch.sigmoid(exp.gate_b(h)) * xp_stacked[i, :, t, :]
                         h_out = exp._attract(h, h_fast_t, x_emb)
                         h_exps.append(h_out)
                         h_fasts.append(h_fast_t)
