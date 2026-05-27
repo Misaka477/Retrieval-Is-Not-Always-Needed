@@ -7,7 +7,7 @@ class STE(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x): return torch.sigmoid(x)
     @staticmethod
-    def backward(ctx, grad): return grad
+    def backward(ctx, grad): return grad * 0.5
 
 CONV_THRESH = 0.05
 LR = 1e-4
