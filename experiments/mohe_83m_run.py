@@ -115,14 +115,9 @@ if os.path.exists(resume_path):
     try:
         opt.load_state_dict(ckpt["opt"])
     except ValueError:
-        print("  Optimizer state incompatible (new params), reinitializing")
+        print("  Optimizer state incompatible, reinitializing")
     start_ep = ckpt["ep"]
-    if "scheduler" in ckpt:
-        try:
-            scheduler.load_state_dict(ckpt["scheduler"])
-        except Exception:
-            pass
-    print(f"  Resumed from ep {start_ep}")
+    print(f"  Resumed from ep {start_ep}, scheduler warmup starts from 0")
 
 LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), CKPT_DIR, f"{CKPT_NAME}.csv")
 print("Training MoHE 83M on FineWeb+StarCoder+OpenWebMath...")
