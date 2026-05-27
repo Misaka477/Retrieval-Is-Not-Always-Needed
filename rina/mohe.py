@@ -3,6 +3,12 @@ MoHE: Mixture of Hebbian Experts with Depth-of-Thought.
 """
 import torch, torch.nn as nn
 
+class STE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x): return torch.sigmoid(x)
+    @staticmethod
+    def backward(ctx, grad): return grad
+
 CONV_THRESH = 0.05
 LR = 1e-4
 HEBB_LR = 0.05
@@ -131,8 +137,8 @@ class MoHE(nn.Module):
                 h_exps = []
                 h_fasts = []
                 if self.training and _use_light:
-                    a = torch.stack([torch.sigmoid(exp.gate_a(h)) for exp in self.experts])
-                    b = torch.stack([torch.sigmoid(exp.gate_b(h)) for exp in self.experts])
+                    a = torch.stack([STE.apply(exp.gate_a(h)) for exp in self.experts])
+                    b = torch.stack([STE.apply(exp.gate_b(h)) for exp in self.experts])
                     h_fast = a * h.unsqueeze(0) + b * xp_stacked[:, :, t, :]
                     h_out_pk, _ = _FusedLightFunction.apply(
                         h_fast, h, x_emb, P, fmw, fmb, nw, nb, sw, sb)
