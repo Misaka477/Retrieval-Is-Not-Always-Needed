@@ -150,10 +150,10 @@ for ep in range(start_ep, EPOCHS + 1):
         # SGDR: reset optimizer + warmup every 2000 steps
         if global_step % 2000 == 0:
             opt = torch.optim.AdamW([
-                {"params": other_params, "lr": LR * 0.1},
-                {"params": head_params, "lr": head_lr * 0.1},
+                {"params": other_params, "lr": LR},
+                {"params": head_params, "lr": head_lr},
             ])
-            scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, s / 200))
+            scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, s / 500))
         torch.cuda.empty_cache()
         if DEBUG_MEM and bi % 10 == 0:
             alloc = torch.cuda.memory_allocated() / 1024**2
