@@ -90,7 +90,13 @@ model = MoHE(VOCAB, DM, NP, n_experts=4,
              aux_loss_weight=0.5, route_noise=0.2, expert_dropout=0.2, topk=2).to(device)
 n = sum(p.numel() for p in model.parameters())
 print(f"Params: {n/1e6:.2f}M")
-opt = torch.optim.AdamW(model.parameters(), lr=LR)
+head_lr = LR * 3
+other_params = [p for n, p in model.named_parameters() if not n.startswith("head.")]
+head_params = list(model.head.parameters())
+opt = torch.optim.AdamW([
+    {"params": other_params, "lr": LR},
+    {"params": head_params, "lr": head_lr},
+])
 scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lambda step: min(1.0, step / 500))
 
 start_ep = 1
