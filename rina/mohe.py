@@ -8,15 +8,9 @@ LR = 1e-4
 HEBB_LR = 0.05
 INHIBIT_LR = 0.5
 
-try:
-    from rina.kernels import FusedLightFunction as _FusedLightFunction
-    _use_light = True
-except Exception:
-    _use_light = False
-
 
 class ExpertCell(nn.Module):
-    """Single Hebbian expert: fast SSM + slow linear field."""
+    """Single Hebbian expert with independent recurrence state."""
     def __init__(self, dm, np_, name=""):
         super().__init__()
         self.name = name
@@ -33,32 +27,31 @@ class ExpertCell(nn.Module):
         self.norm = nn.LayerNorm(dm)
         self.patterns = nn.Parameter(torch.randn(np_, dm) * 0.02)
 
-    def forward(self, h, x_emb):
-        a = torch.sigmoid(self.gate_a(x_emb))
-        b = torch.sigmoid(self.gate_b(x_emb))
-        xp = self.proj_in(x_emb)
-        h_fast = a * h + b * xp
-        return self._attract(h, h_fast, x_emb), h_fast
-
-    def _attract(self, h, h_fast, x_emb):
-        """Attractor path only (gate_a/b already computed)."""
+    def _attract(self, h_fast, h_state, x_emb):
         P = self.patterns.T @ self.patterns
         field = h_fast @ P
         field = self.proj(field)
         field = self.field_mix(field)
         field = self.norm(field)
-        gate = torch.sigmoid(self.slow_gate(torch.cat([h, x_emb], dim=-1)))
+        gate = torch.sigmoid(self.slow_gate(torch.cat([h_state, x_emb], dim=-1)))
         return h_fast + gate * field * 0.1
+
+    def step(self, h_state, x_emb):
+        """One step: from current state + input, produce output + next state."""
+        xp = self.proj_in(x_emb)
+        a = torch.sigmoid(self.gate_a(h_state))
+        b = torch.sigmoid(self.gate_b(h_state))
+        h_fast = a * h_state + b * xp
+        return self._attract(h_fast, h_state, x_emb), h_fast
 
 
 class MoHE(nn.Module):
     """Multi-layer MoHE with Depth-of-Thought."""
     def __init__(self, vocab, dm, np_, n_experts=4, aux_loss_weight=0.1,
-                 route_noise=0.0, expert_dropout=0.0, topk=0):
+                 route_noise=0.0, topk=0):
         super().__init__()
         self.aux_loss_weight = aux_loss_weight
         self.route_noise = route_noise
-        self.expert_dropout = expert_dropout
         self.embed = nn.Embedding(vocab, dm)
         self.embed.weight.data.normal_(0, 0.05)
         self.embed_norm = nn.LayerNorm(dm)
@@ -76,7 +69,6 @@ class MoHE(nn.Module):
         self.consolidate_norm = nn.LayerNorm(dm)
 
         self.topk = topk
-        self.expert_capacity = 1.25
         self.router_bias = nn.Parameter(torch.zeros(n_experts))
         self.expert_norm = nn.LayerNorm(dm)
         self._bias_lr = 1.0
@@ -99,26 +91,13 @@ class MoHE(nn.Module):
         self._cap_fired = 0
         route_logits = []
         self._router_qloss = 0.0
-        self._diversity_loss = 0.0
         self._loss_count = 0
 
-        # Batch gate precomputation for entire sequence
-        a_stacked = torch.stack([torch.sigmoid(exp.gate_a(emb)) for exp in self.experts])
-        b_stacked = torch.stack([torch.sigmoid(exp.gate_b(emb)) for exp in self.experts])
-        xp_stacked = torch.stack([exp.proj_in(emb) for exp in self.experts])
-        if self.training and _use_light:
-            fmw = torch.stack([e.field_mix.weight for e in self.experts])
-            fmb = torch.stack([e.field_mix.bias for e in self.experts])
-            nw = torch.stack([e.norm.weight for e in self.experts])
-            nb = torch.stack([e.norm.bias for e in self.experts])
-            sw = torch.stack([e.slow_gate.weight.squeeze(0) for e in self.experts])
-            sb = torch.stack([e.slow_gate.bias.squeeze(0) for e in self.experts])
         for t in range(seq_len):
             x_emb = emb[:, t, :]
             self.prev_route.zero_()
             h_prev = h
-            if self.training and _use_light:
-                P = torch.stack([e.patterns.T @ e.patterns for e in self.experts])
+            h_states = [torch.zeros(bsz, dm, device=h.device) for _ in self.experts]
 
             for depth in range(max_depth):
                 self._conv_total += 1
@@ -138,25 +117,11 @@ class MoHE(nn.Module):
 
                 h_exps = []
                 h_fasts = []
-                if self.training and _use_light:
-                    h_fast = (a_stacked[:, :, t, :] * h.unsqueeze(0) +
-                              b_stacked[:, :, t, :] * xp_stacked[:, :, t, :])
-                    h_fast = torch.stack([exp.proj(h_fast[i]) for i, exp in enumerate(self.experts)])
-                    h_out_pk, _ = _FusedLightFunction.apply(
-                        h_fast, h, x_emb, P, fmw, fmb, nw, nb, sw, sb)
-                    h_exps = [h_out_pk[i] for i in range(len(self.experts))]
-                    h_fasts = [h_fast[i] for i in range(len(self.experts))]
-                else:
-                    for i, exp in enumerate(self.experts):
-                        h_fast_t = a_stacked[i, :, t, :] * h + b_stacked[i, :, t, :] * xp_stacked[i, :, t, :]
-                        h_out = exp._attract(h, h_fast_t, x_emb)
-                        h_exps.append(h_out)
-                        h_fasts.append(h_fast_t)
-
-                if self.training and self.expert_dropout > 0:
-                    keep = torch.bernoulli(torch.full((len(self.experts),),
-                        1 - self.expert_dropout, device=h.device)).unsqueeze(1).unsqueeze(2)
-                    h_exps = [h * k for h, k in zip(h_exps, keep)]
+                for i, exp in enumerate(self.experts):
+                    h_out, h_fast = exp.step(h_states[i], x_emb)
+                    h_states[i] = h_fast.detach()
+                    h_exps.append(h_out)
+                    h_fasts.append(h_fast)
 
                 h_exps = [self.expert_norm(h) for h in h_exps]
 
@@ -164,15 +129,6 @@ class MoHE(nn.Module):
                     _, indices = route_weights.topk(self.topk, dim=-1)
                     mask = torch.zeros_like(route_weights).scatter_(1, indices, 1)
                     h_exps = [h * mask[:, i:i+1] for i, h in enumerate(h_exps)]
-
-                if self.training and self.expert_capacity > 0:
-                    cap = int(bsz * self.expert_capacity)
-                    for i, h in enumerate(h_exps):
-                        active = (h.abs().sum(dim=-1) > 0).float()
-                        cnt = int(active.sum().item())
-                        if cnt > cap:
-                            drop = torch.where(active > 0)[0][torch.randperm(cnt)[:cnt - cap]]
-                            h_exps[i][drop] = 0
 
                 h_stack = torch.cat(h_exps, dim=-1)
                 h_new = self.consolidate_norm(self.consolidate(h_stack))
@@ -184,8 +140,6 @@ class MoHE(nn.Module):
                         target = (-err).softmax(dim=0).T
                     log_prob = route_raw.log_softmax(-1)
                     self._router_qloss += -(target * log_prob).sum(-1).mean()
-                    h_avg = h_stack_exps.mean(dim=0, keepdim=True)
-                    self._diversity_loss += -((h_stack_exps - h_avg) ** 2).mean()
                     self._loss_count += 1
 
                 if depth > 0 and (h_new - h_prev).norm().item() / (h_prev.norm().item() + 1e-8) < CONV_THRESH:
@@ -250,8 +204,7 @@ class MoHE(nn.Module):
             self._last_aux_loss = aux_loss + z_loss + router_z_loss
             if self._loss_count > 0:
                 self._router_qloss /= self._loss_count
-                self._diversity_loss /= self._loss_count
-                aux_total = self._router_qloss * 0.1 + self._diversity_loss * 0.4
+                aux_total = self._router_qloss * 0.1
                 self._last_aux_loss += max(0.0, aux_total)
             self._gate_ratio = (p.max(-1).values / p.min(-1).values.clamp(min=1e-10)).median().item()
             # Router bias adjustment
