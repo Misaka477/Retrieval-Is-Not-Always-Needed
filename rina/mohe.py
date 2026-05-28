@@ -23,6 +23,11 @@ class ExpertCell(nn.Module):
         self.gate_a = nn.Linear(dm, dm)
         self.gate_b = nn.Linear(dm, dm)
         self.proj_in = nn.Linear(dm, dm)
+        self.proj = nn.Sequential(
+            nn.Linear(dm, dm * 2, bias=False),
+            nn.GELU(),
+            nn.Linear(dm * 2, dm, bias=False),
+        )
         self.slow_gate = nn.Linear(dm * 2, 1)
         self.field_mix = nn.Linear(dm, dm)
         self.norm = nn.LayerNorm(dm)
@@ -39,6 +44,7 @@ class ExpertCell(nn.Module):
         """Attractor path only (gate_a/b already computed)."""
         P = self.patterns.T @ self.patterns
         field = h_fast @ P
+        field = self.proj(field)
         field = self.field_mix(field)
         field = self.norm(field)
         gate = torch.sigmoid(self.slow_gate(torch.cat([h, x_emb], dim=-1)))
@@ -97,6 +103,8 @@ class MoHE(nn.Module):
         self._loss_count = 0
 
         # Batch gate precomputation for entire sequence
+        a_stacked = torch.stack([torch.sigmoid(exp.gate_a(emb)) for exp in self.experts])
+        b_stacked = torch.stack([torch.sigmoid(exp.gate_b(emb)) for exp in self.experts])
         xp_stacked = torch.stack([exp.proj_in(emb) for exp in self.experts])
         if self.training and _use_light:
             fmw = torch.stack([e.field_mix.weight for e in self.experts])
@@ -131,16 +139,16 @@ class MoHE(nn.Module):
                 h_exps = []
                 h_fasts = []
                 if self.training and _use_light:
-                    a = torch.stack([torch.sigmoid(exp.gate_a(h)) for exp in self.experts])
-                    b = torch.stack([torch.sigmoid(exp.gate_b(h)) for exp in self.experts])
-                    h_fast = a * h.unsqueeze(0) + b * xp_stacked[:, :, t, :]
+                    h_fast = (a_stacked[:, :, t, :] * h.unsqueeze(0) +
+                              b_stacked[:, :, t, :] * xp_stacked[:, :, t, :])
+                    h_fast = torch.stack([exp.proj(h_fast[i]) for i, exp in enumerate(self.experts)])
                     h_out_pk, _ = _FusedLightFunction.apply(
                         h_fast, h, x_emb, P, fmw, fmb, nw, nb, sw, sb)
                     h_exps = [h_out_pk[i] for i in range(len(self.experts))]
                     h_fasts = [h_fast[i] for i in range(len(self.experts))]
                 else:
                     for i, exp in enumerate(self.experts):
-                        h_fast_t = torch.sigmoid(exp.gate_a(h)) * h + torch.sigmoid(exp.gate_b(h)) * xp_stacked[i, :, t, :]
+                        h_fast_t = a_stacked[i, :, t, :] * h + b_stacked[i, :, t, :] * xp_stacked[i, :, t, :]
                         h_out = exp._attract(h, h_fast_t, x_emb)
                         h_exps.append(h_out)
                         h_fasts.append(h_fast_t)
