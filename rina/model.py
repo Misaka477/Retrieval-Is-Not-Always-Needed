@@ -15,11 +15,13 @@ def _load_wkv7():
 
 class WKV7Fn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, r, w, k, v, a, b):
+    def forward(ctx, r, w, k, v, a, b, s=None, sa=None):
         B,T,H,N = r.shape
         y = torch.empty(B,T,H,N, device=r.device, dtype=torch.float32)
-        s = torch.zeros(B, H, (T+15)//16, N, N, device=r.device, dtype=torch.float32)
-        sa = torch.zeros(B, T, H, N, device=r.device, dtype=torch.float32)
+        if s is None:
+            s = torch.zeros(B, H, (T+15)//16, N, N, device=r.device, dtype=torch.float32)
+        if sa is None:
+            sa = torch.zeros(B, T, H, N, device=r.device, dtype=torch.float32)
         ctx.save_for_backward(r,w,k,v,a,b,s,sa)
         torch.ops.rwkv7_clampw.forward(r.contiguous(),w.contiguous(),k.contiguous(),v.contiguous(),
                                         a.contiguous(),b.contiguous(),y,s,sa)
@@ -32,7 +34,32 @@ class WKV7Fn(torch.autograd.Function):
         torch.ops.rwkv7_clampw.backward(r.contiguous(),w.contiguous(),k.contiguous(),v.contiguous(),
                                          a.contiguous(),b.contiguous(),dy.contiguous(),
                                          s,sa,dr,dw,dk,dv,da,db)
-        return dr,dw,dk,dv,da,db
+        return dr,dw,dk,dv,da,db,None,None
+
+    @staticmethod
+    def stateful_apply(r, w, k, v, a, b, wkv_state=None):
+        B,T,H,N = r.shape
+        if wkv_state is None:
+            s = torch.zeros(B, H, (T+15)//16, N, N, device=r.device, dtype=torch.float32)
+            total_T = 0
+        else:
+            s = wkv_state
+            total_T = s.shape[2] * 16
+
+        if T == 0:
+            return torch.zeros(B, 0, H, N, device=r.device), s
+
+        chunks = (total_T + T + 15) // 16
+        if chunks > s.shape[2]:
+            ns = torch.zeros(B, H, chunks, N, N, device=r.device, dtype=torch.float32)
+            ns[:, :, :s.shape[2]] = s
+            s = ns
+
+        sa = torch.zeros(B, T, H, N, device=r.device, dtype=torch.float32)
+        y = torch.zeros(B, T, H, N, device=r.device, dtype=torch.float32)
+        torch.ops.rwkv7_clampw.forward(r.contiguous(),w.contiguous(),k.contiguous(),v.contiguous(),
+                                        a.contiguous(),b.contiguous(),y,s,sa)
+        return y.view(B, T, H * N).clone(), s
 
 class AttractorExpert(nn.Module):
     def __init__(self, dm, np_, name=""):
@@ -47,9 +74,9 @@ class AttractorExpert(nn.Module):
         return h_in + gate * field
 
 class MoHERWKV(nn.Module):
-    def __init__(self, vocab, dm, np_, n_experts=4, aux_loss_weight=0.1, route_noise=0.0, topk=0):
+    def __init__(self, vocab, dm, np_, n_experts=4, aux_loss_weight=0.1, route_noise=0.0, topk=0, wkv_no_grad=False):
         super().__init__()
-        self.aux_loss_weight = aux_loss_weight; self.route_noise = route_noise; self.dm = dm; self.n_experts = n_experts
+        self.aux_loss_weight = aux_loss_weight; self.route_noise = route_noise; self.dm = dm; self.n_experts = n_experts; self.wkv_no_grad = wkv_no_grad
         _load_wkv7()
         self.embed = nn.Embedding(vocab,dm); self.embed.weight.data.normal_(0,0.05); self.embed_norm = nn.LayerNorm(dm)
         self.head = nn.Linear(dm,vocab,bias=True); self.head.weight = self.embed.weight; self.head.bias.data.fill_(-10.8)
@@ -63,7 +90,7 @@ class MoHERWKV(nn.Module):
         self.router_bias = nn.Parameter(torch.randn(n_experts) * 0.5); self.expert_norm = nn.LayerNorm(dm)
         self.router.weight.data.mul_(2.0)
 
-    def forward(self, x):
+    def forward(self, x, wkv_state=None):
         bsz, seq_len = x.shape; device = x.device;         emb = self.embed_norm(self.embed(x))
         B,T,D = emb.shape; H = D // 64; N = 64
         w = torch.exp(-torch.exp(self.tmix_w))  # [H,N]
@@ -72,7 +99,10 @@ class MoHERWKV(nn.Module):
         v4d = v.view(B,T,H,N).contiguous(); a4d = a.view(B,T,H,N).contiguous()
         w4d = w.unsqueeze(0).unsqueeze(0).expand(B,T,H,N).contiguous()
         b4d = a4d.clone()
-        h = WKV7Fn.apply(r4d,w4d,k4d,v4d,-a4d,b4d).view(B,T,D)
+        if self.training and not self.wkv_no_grad:
+            h = WKV7Fn.apply(r4d,w4d,k4d,v4d,-a4d,b4d).view(B,T,D)
+        else:
+            h, _ = WKV7Fn.stateful_apply(r4d,w4d,k4d,v4d,-a4d,b4d, wkv_state)
         
         route_logits = []
         for depth in range(3):
@@ -98,5 +128,5 @@ class MoHERWKV(nn.Module):
             eb = -0.01 * (-(p * torch.log(p.clamp(min=1e-10))).sum(-1).mean())
             self._last_aux_loss = al+zl+rl+eb
         else: self._last_aux_loss = 0.0
-        return logits
+        return (logits, h.clone()) if wkv_state is not None else logits
     def finish_training_step(self): pass
