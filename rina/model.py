@@ -99,10 +99,11 @@ class MoHERWKV(nn.Module):
         v4d = v.view(B,T,H,N).contiguous(); a4d = a.view(B,T,H,N).contiguous()
         w4d = w.unsqueeze(0).unsqueeze(0).expand(B,T,H,N).contiguous()
         b4d = a4d.clone()
+        new_wkv_state = None
         if self.training and not self.wkv_no_grad:
             h = WKV7Fn.apply(r4d,w4d,k4d,v4d,-a4d,b4d).view(B,T,D)
         else:
-            h, _ = WKV7Fn.stateful_apply(r4d,w4d,k4d,v4d,-a4d,b4d, wkv_state)
+            h, new_wkv_state = WKV7Fn.stateful_apply(r4d,w4d,k4d,v4d,-a4d,b4d, wkv_state)
         
         route_logits = []
         for depth in range(3):
@@ -128,5 +129,5 @@ class MoHERWKV(nn.Module):
             eb = -0.01 * (-(p * torch.log(p.clamp(min=1e-10))).sum(-1).mean())
             self._last_aux_loss = al+zl+rl+eb
         else: self._last_aux_loss = 0.0
-        return (logits, h.clone()) if wkv_state is not None else logits
+        return (logits, new_wkv_state) if not self.training or self.wkv_no_grad else logits
     def finish_training_step(self): pass

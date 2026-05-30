@@ -7,7 +7,7 @@ from rina import MoHERWKV
 device = 'cuda'
 VOCAB, DM, NP = 65536, 768, 1536
 BSZ, SEQ = 4, 512
-LR = 3e-4; N_STEPS = 120000
+LR = 3e-4; N_STEPS = 180000
 CKPT_DIR = 'checkpoints'
 RESUME_CKPT = os.path.join(CKPT_DIR, 'mohe_transferred_latest.pt')
 INIT_CKPT = os.path.join(CKPT_DIR, 'mohe_transferred_init.pt')
@@ -39,8 +39,8 @@ if os.path.exists(RESUME_CKPT):
             del sd[k]
     model.load_state_dict(sd, strict=False)
     opt.load_state_dict(state['opt'])
-    scheduler.load_state_dict(state['scheduler'])
     start_step = state['step']
+    # scheduler not loaded — fresh warmup + cosine with N_STEPS=180000
     total_loss = state['total_loss']
     print(f'  Resumed at step {start_step}')
 else:
@@ -75,7 +75,8 @@ def eval_val():
     val_loss = 0.0; val_cnt = 0; steps = 0
     for s in range(0, len(ids_val) - BSZ * SEQ, BSZ * SEQ):
         x = ids_val[s:s+BSZ*SEQ].view(BSZ, SEQ).to(device, dtype=torch.long)
-        logits = model(x)
+        out = model(x)
+        logits = out[0] if isinstance(out, tuple) else out
         loss = F.cross_entropy(logits.reshape(-1, VOCAB), x.reshape(-1), label_smoothing=0.1)
         val_loss += loss.item() * x.size(0)
         val_cnt += x.size(0)
