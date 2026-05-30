@@ -14,9 +14,9 @@ from rina.mohe import MoHE
 
 device = "cuda"; random.seed(42)
 DEBUG_MEM = False  # set True to print alloc every 10 steps
-VOCAB, DM, NP = 50257, 1024, 512
+VOCAB, DM, NP = 50257, 1024, 2048
 SEQ, BS = 128, 8
-LR = 1e-4; EPOCHS = 10
+LR = 2e-4; EPOCHS = 10
 SUBSAMPLE = 8; MAX_TOKENS = 200_000_000
 STEPS_PER_EPOCH = 2000
 MAX_DEPTH = 3
@@ -121,6 +121,7 @@ if os.path.exists(resume_path):
             scheduler.load_state_dict(ckpt["scheduler"])
         except Exception:
             pass
+    scheduler.base_lrs = [LR, head_lr]  # override checkpoint's LR
     print(f"  Resumed from ep {start_ep}")
 elif os.path.exists(weights_path):
     sd = torch.load(weights_path, map_location=device, weights_only=False)
