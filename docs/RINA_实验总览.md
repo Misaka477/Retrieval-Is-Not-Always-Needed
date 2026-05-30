@@ -509,3 +509,52 @@ step    loss   ppl      exp_sim
 | MAX_DEPTH | 1 → 3 | 迭代计算让专家差异化分工 |
 
 **正在运行中。**
+
+---
+
+## 10. Gen 3 — MoHE-RWKV 109M
+
+**架构：** RWKV-v7 WKV backbone + 12 attractor-based MoE experts + per-token topk=2 routing + depth=3 chain
+
+| 参数 | 值 |
+|------|-----|
+| dm / NP | 768 / 1536 |
+| n_experts / topk | 12 / 2 |
+| route_raw | ×3.0 |
+| router_bias | N(0, 0.5²) |
+| entropy_bonus | -0.01 × H |
+| depth | 3 (chain: h = h_new) |
+| expert scale | ×1.0 (gate × field, 无衰减) |
+| SEQ / BSZ | 512 / 4 |
+| vocab | 65536 (RWKV) |
+| speed | 2-3 it/s @ SEQ=512, 8GB laptop |
+| 参数量 | 109.44M |
+
+### 10.1 预训练结果
+
+| step | ppl | ent | val_ppl | 备注 |
+|------|-----|-----|---------|------|
+| 200 | 1238 | 0.96 | — | transferred init |
+| 3000 | 5.8 | 2.48 | — | SEQ=128, 旧 .mean(1) 路由 |
+| 6000 | 5.5 | 2.13 | — | SEQ=512, topk=2 |
+| 90000 | 4.9 | 0.85 | 4.3 | per-token + inertia=0 → 路由分化 |
+
+### 10.2 关键改进
+
+1. **per-token 路由（去掉 .mean(1)）** — 熵从 2.48 暴降到 0.5
+2. **topk=2 + inertia=0** — 路由分化锁死，无需额外 loss
+3. **depth chain（h = h_new）** — 修复原 depth=3 空转 bug
+4. **54× 吞吐** — attractor 批量化：`torch.stack` 替代 4608 次 Python 调用
+
+### 10.3 SFT (进行中)
+
+- 数据：196K 条（R1 88K + o1 CoT 50K + Magic Code 50K + GSM8K 7.5K）
+- 训练：LoRA rank=32, SEQ=1024, BSZ=2, 2000 steps
+- 输出格式：`<|user|>\n...\n<|assistant|>\n...`
+- 身份替换：GPT/Claude/Qwen 等 → Anthelia
+
+### 10.4 后续
+
+- SFT 完成后跑生成测试
+- 验证集 + benchmark（GSM8K / HumanEval）
+- 继续预训练扩充数据量

@@ -23,3 +23,5 @@ RINA_CHECKLIST.md
 HANDOVER.md
 hf_cache/
 logs/
+data/
+experiments/checkpoints/
