@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from rina.architectures.mohe_rwkv import MoHERWKV
+from rina import MoHERWKV
 
 MODEL_ID = "BlinkDL/rwkv7-g1"
 DEST = os.path.join(os.path.dirname(os.path.abspath(__file__)),

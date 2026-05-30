@@ -6,6 +6,7 @@ __pycache__/
 *.lib
 *.pdb
 *.log
+*.pt
 archive/checkpoints/
 .vscode/
 
@@ -13,6 +14,7 @@ archive/references/
 archive/niah_scripts/
 docs/RINA实验日志.md
 docs/KVR_实验全记录.md
+docs/ARCH.md
 checkpoints/*.pt
 checkpoints/*.npy
 tokenizers/*
@@ -20,3 +22,4 @@ paper/
 RINA_CHECKLIST.md
 HANDOVER.md
 hf_cache/
+logs/

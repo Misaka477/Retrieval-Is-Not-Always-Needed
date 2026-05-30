@@ -2,12 +2,12 @@
 import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import math, torch, torch.nn.functional as F, numpy as np
 from tqdm import tqdm
-from rina.architectures.mohe_rwkv import MoHERWKV
+from rina import MoHERWKV
 
 device = 'cuda'
 VOCAB, DM, NP = 65536, 768, 1536
 BSZ, SEQ = 4, 512
-LR = 3e-4; N_STEPS = 90000
+LR = 3e-4; N_STEPS = 120000
 CKPT_DIR = 'checkpoints'
 RESUME_CKPT = os.path.join(CKPT_DIR, 'mohe_transferred_latest.pt')
 INIT_CKPT = os.path.join(CKPT_DIR, 'mohe_transferred_init.pt')

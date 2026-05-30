@@ -2,7 +2,7 @@
 import sys, os; sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.stdout.reconfigure(encoding='utf-8')
 import torch
-from rina.architectures.mohe_rwkv import MoHERWKV
+from rina import MoHERWKV
 from rina.rwkv_tokenizer import TRIE_TOKENIZER
 from rina.sample import sample
 

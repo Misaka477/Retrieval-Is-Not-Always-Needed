@@ -1,87 +1,102 @@
-# DEPRECATED ¡ª legacy TemporalSNN architecture, use rina.mohe.MoHE instead
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+"""MoHE-RWKV v7 CUDA. Pre-hardcoded kernel. Float32."""
+import os, torch, torch.nn as nn, torch.nn.functional as F
+from torch.utils.cpp_extension import load
 
-from rina.cell import TemporalSNNCell
+CONV_THRESH = 0.05; HEBB_LR = 0.05; INHIBIT_LR = 0.5
+_WKVC = None
 
+def _load_wkv7():
+    global _WKVC
+    if _WKVC is not None: return
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    _WKVC = load(name="rwkv7_clampw",
+        sources=[os.path.join(root, "kernels/rwkv7_clampw.cu"), os.path.join(root, "kernels/rwkv7_clampw.cpp")],
+        extra_cuda_cflags=["-D_N_=64", "-O3"], is_python_module=False, verbose=False)
 
-class TemporalSNNModel(nn.Module):
-    def __init__(self, vocab_size, d_model=256, n_patterns=4096,
-                 beta=1.0, attract_every=1, error_threshold=0.5,
-                 hebbian_lr=0.0, hebbian_decay=0.999, inhibition_threshold=0.0, pattern_rank=0,
-                 n_slots=0):
+class WKV7Fn(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, r, w, k, v, a, b):
+        B,T,H,N = r.shape
+        y = torch.empty(B,T,H,N, device=r.device, dtype=torch.float32)
+        s = torch.zeros(B, H, (T+15)//16, N, N, device=r.device, dtype=torch.float32)
+        sa = torch.zeros(B, T, H, N, device=r.device, dtype=torch.float32)
+        ctx.save_for_backward(r,w,k,v,a,b,s,sa)
+        torch.ops.rwkv7_clampw.forward(r.contiguous(),w.contiguous(),k.contiguous(),v.contiguous(),
+                                        a.contiguous(),b.contiguous(),y,s,sa)
+        return y
+    @staticmethod
+    def backward(ctx, dy):
+        r,w,k,v,a,b,s,sa = ctx.saved_tensors
+        dr = torch.empty_like(r); dw = torch.empty_like(r); dk = torch.empty_like(r)
+        dv = torch.empty_like(r); da = torch.empty_like(r); db = torch.empty_like(r)
+        torch.ops.rwkv7_clampw.backward(r.contiguous(),w.contiguous(),k.contiguous(),v.contiguous(),
+                                         a.contiguous(),b.contiguous(),dy.contiguous(),
+                                         s,sa,dr,dw,dk,dv,da,db)
+        return dr,dw,dk,dv,da,db
+
+class AttractorExpert(nn.Module):
+    def __init__(self, dm, np_, name=""):
         super().__init__()
-        self.d_model = d_model
-        self.attract_every = attract_every
-        self.embed = nn.Embedding(vocab_size, d_model)
-        self.cell = TemporalSNNCell(d_model, n_patterns=n_patterns,
-                                     beta=beta, attract_every=attract_every,
-                                     error_threshold=error_threshold,
-                                     hebbian_lr=hebbian_lr,
-                                     hebbian_decay=hebbian_decay,
-                                     inhibition_threshold=inhibition_threshold,
-                                     pattern_rank=pattern_rank)
-        self.head = nn.Linear(d_model, vocab_size)
-        self.state_norm = nn.LayerNorm(d_model)
+        self.name = name; self.proj = nn.Sequential(nn.Linear(dm,dm*2,bias=False),nn.GELU(),nn.Linear(dm*2,dm,bias=False))
+        self.slow_gate = nn.Linear(dm*2,1); self.field_mix = nn.Linear(dm,dm); self.norm = nn.LayerNorm(dm)
+        self.patterns = nn.Parameter(torch.randn(np_,dm)*0.02)
+    def forward(self, h_in, x_emb):
+        P = self.patterns.T @ self.patterns; field = h_in @ P; field = self.proj(field)
+        field = self.field_mix(field); field = self.norm(field)
+        gate = torch.sigmoid(self.slow_gate(torch.cat([h_in, x_emb], dim=-1)))
+        return h_in + gate * field
 
-        self.n_slots = n_slots
-        if n_slots > 0:
-            self.register_buffer("slot_table", torch.zeros(vocab_size, d_model))
-            self.slot_proj = nn.Linear(d_model, d_model)
+class MoHERWKV(nn.Module):
+    def __init__(self, vocab, dm, np_, n_experts=4, aux_loss_weight=0.1, route_noise=0.0, topk=0):
+        super().__init__()
+        self.aux_loss_weight = aux_loss_weight; self.route_noise = route_noise; self.dm = dm; self.n_experts = n_experts
+        _load_wkv7()
+        self.embed = nn.Embedding(vocab,dm); self.embed.weight.data.normal_(0,0.05); self.embed_norm = nn.LayerNorm(dm)
+        self.head = nn.Linear(dm,vocab,bias=True); self.head.weight = self.embed.weight; self.head.bias.data.fill_(-10.8)
+        self.router = nn.Linear(dm,n_experts)
+        self.experts = nn.ModuleList([AttractorExpert(dm,np_,name=f"exp_{i}") for i in range(n_experts)])
+        self.tmix_w = nn.Parameter(torch.randn(dm // 64, 64) * 0.01); self.tmix_r = nn.Linear(dm,dm,bias=False)
+        self.tmix_k = nn.Linear(dm,dm,bias=False); self.tmix_v = nn.Linear(dm,dm,bias=False)
+        self.tmix_a = nn.Linear(dm,dm,bias=False)
+        self.consolidate = nn.Linear(dm*n_experts,dm); self.consolidate_norm = nn.LayerNorm(dm)
+        self.topk = topk
+        self.router_bias = nn.Parameter(torch.randn(n_experts) * 0.5); self.expert_norm = nn.LayerNorm(dm)
+        self.router.weight.data.mul_(2.0)
 
-    def slot_write(self, key_id, value_id):
-        with torch.no_grad():
-            v = self.slot_proj(self.embed(torch.tensor([value_id], device=self.slot_table.device)))
-            self.slot_table[key_id] = v.squeeze(0)
-
-    def forward(self, x, return_states=False):
-        bsz, seq_len = x.shape
-        dm = self.d_model
-        emb = self.embed(x)
-        h = torch.zeros(bsz, dm, device=x.device)
-        logits = []
-        states = [h.clone()] if return_states else None
-        for t in range(seq_len):
-            h_in = h + self.slot_table[x[:, t]] if self.n_slots > 0 else h
-            h = self.cell(h_in, emb[:, t, :], step=t)
-            if t == seq_len - 1:
-                pat = self.cell.patterns.unsqueeze(0).expand(bsz, -1, -1) if self.cell.patterns is not None else ((self.cell.U @ self.cell.V).unsqueeze(0).expand(bsz, -1, -1))
-                xi = h.unsqueeze(1)
-                scores = xi @ pat.transpose(1, 2) * self.cell.beta_t[0]
-                attn = torch.softmax(scores, dim=-1)
-                attracted = (attn @ pat).squeeze(1)
-                combined_last = torch.cat([h, emb[:, -1, :]], dim=-1)
-                alpha = torch.sigmoid(self.cell.gate_alpha(combined_last))
-                h = h + alpha * (attracted - h)
-                h = self.cell.norm(h)
-            logits.append(self.head(self.state_norm(h)))
-            if return_states:
-                states.append(h.clone())
-        out = torch.stack(logits, dim=1)
-        if return_states:
-            return out, torch.stack(states, dim=1)
-        return out
-
-    @torch.no_grad()
-    def generate(self, prompt_ids, max_len=128, temperature=0.8, top_k=20):
-        self.eval()
-        self.cell.reverse_gating = True
-        x = torch.tensor([prompt_ids], dtype=torch.long, device=next(self.parameters()).device)
-        for _ in range(max_len):
-            logits = self(x)
-            logit = logits[0, -1, :] / temperature
-            if top_k > 0:
-                v, _ = torch.topk(logit, top_k)
-                logit[logit < v[-1]] = float("-inf")
-            probs = F.softmax(logit, dim=-1)
-            next_id = torch.multinomial(probs, 1).item()
-            x = torch.cat([x[:, -63:], torch.tensor([[next_id]], device=x.device)], dim=1)
-            yield next_id
-        self.cell.reverse_gating = False
-
-    def get_att_rate(self):
-        return self.cell.att_rate
-
-    def get_hebb_rate(self):
-        return self.cell.hebb_rate
+    def forward(self, x):
+        bsz, seq_len = x.shape; device = x.device;         emb = self.embed_norm(self.embed(x))
+        B,T,D = emb.shape; H = D // 64; N = 64
+        w = torch.exp(-torch.exp(self.tmix_w))  # [H,N]
+        r = self.tmix_r(emb); k = self.tmix_k(emb); v = self.tmix_v(emb); a = self.tmix_a(emb) * 0.01
+        r4d = r.view(B,T,H,N).contiguous(); k4d = k.view(B,T,H,N).contiguous()
+        v4d = v.view(B,T,H,N).contiguous(); a4d = a.view(B,T,H,N).contiguous()
+        w4d = w.unsqueeze(0).unsqueeze(0).expand(B,T,H,N).contiguous()
+        b4d = a4d.clone()
+        h = WKV7Fn.apply(r4d,w4d,k4d,v4d,-a4d,b4d).view(B,T,D)
+        
+        route_logits = []
+        for depth in range(3):
+            route_raw = (self.router(h) + self.router_bias) * 3.0
+            if self.training and self.route_noise > 0: route_raw += torch.randn_like(route_raw)*self.route_noise
+            route_logits.append(route_raw)
+            route_weights = torch.softmax(route_raw, dim=-1)
+            self._last_route_entropy = -(route_weights*torch.log(route_weights.clamp(min=1e-10))).sum(-1).mean().item()
+            h_exps = torch.stack([e(h, emb) for e in self.experts], dim=0)
+            h_exps = self.expert_norm(h_exps.permute(1,2,0,3).reshape(-1,D)).reshape(B,T,self.n_experts,D)
+            if self.topk > 0 and self.topk < self.n_experts:
+                _, inds = route_weights.topk(self.topk,dim=-1)
+                mask = torch.zeros(B,T,self.n_experts,device=device).scatter_(-1,inds,1)
+                h_exps = h_exps * mask.unsqueeze(-1)
+            h_new = self.consolidate_norm(self.consolidate(h_exps.reshape(B,T,self.n_experts*D)))
+            h = h_new
+        logits = self.head(h_new)
+        if self.training and route_logits:
+            lf = torch.stack(route_logits,dim=0).transpose(0,1).reshape(-1,self.n_experts)
+            p = torch.softmax(lf,dim=-1); f = p.mean(dim=0)
+            al = self.aux_loss_weight*self.n_experts*(f*p.mean(0)).sum()
+            zl = (lf.logsumexp(-1)**2).mean()*1e-4; rl = 1e-3*(lf**2).mean()
+            eb = -0.01 * (-(p * torch.log(p.clamp(min=1e-10))).sum(-1).mean())
+            self._last_aux_loss = al+zl+rl+eb
+        else: self._last_aux_loss = 0.0
+        return logits
+    def finish_training_step(self): pass

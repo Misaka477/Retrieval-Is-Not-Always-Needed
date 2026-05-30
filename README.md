@@ -1,98 +1,78 @@
-# RINA — Retrieval Is Not Always Needed
+# RINA (Retrieval Is Not Always Needed) — MoHE-RWKV
 
-MoHE (Mixture of Hebbian Experts) — gated dual-memory linear recurrence with Depth-of-Thought.
+109M language model with per-token expert routing, depth-of-thought iteration, and RWKV-v7 linear recurrence.
 
-```python
-Fast memory:  h_fast = a·h + b·x                ← SSM gate (per-expert)
-Slow memory:  P = patterns.T @ patterns          ← Hebbian linear field
-Fusion:       h_out = h_fast + gate·field_force   ← gated dual-memory
+## Architecture
 
-Depth-of-Thought: iterative refinement over N passes per token
-Winner-take-all Hebbian + loser inhibition → domain specialization
+```
+Embed → WKV (RWKV-v7) → [depth×3: Router → 12×AttractorExpert → Consolidate] → Head
 ```
 
-## Key Results
+| Component | Detail |
+|-----------|--------|
+| Time mixing | RWKV-v7 WKV CUDA kernel (head 64, H=12, float32) |
+| Expert | Attractor: `h + gate · field`, `field = h @ (P^T·P) → Proj → FieldMix → LN` |
+| Routing | Per-token, topk=2, ×3.0 scaling, no cross-step smoothing |
+| Depth | 3 iterations with `h = h_new` chain (DoT-like) |
+| Params | 109.44M (embed 50.3M + expert 55.0M + others 4.1M) |
 
-### 83M (DM=1024, NP=512, NE=4, GPT-2 50K vocab, weight tying)
+## Current Results
 
-| Config | Data | Speed | Status |
-|--------|------|-------|--------|
-| depth=1 | FineWeb+StarCoder+Math 200M | ~2.95s/step (K3 Light) | ~plateau at loss=8.1, exp_sim collapse |
-| **depth=3+noise+dropout** | same | running | **current** |
+### Gen 3 — MoHE-RWKV 109M (current)
 
-Expert collapse observed at depth=1 (exp_sim 0.80→0.91, loss flat from step 1000). Mitigated with depth=3, router noise (σ=0.1), expert dropout (p=0.1), aux_loss_weight=0.5.
+- **ppl=4.9**, val_ppl=4.3, route entropy=0.5 (differentiated)
+- **SEQ=512, BSZ=4, ~2 it/s** (54× throughput over previous arch)
+- 500M tokens: FW(50%) + SC(20%) + Math(15%) + Chinese(15%)
+- LR: 3e-4 → cosine → 3e-5 over 90000 steps
 
-### 28M (DM=256, NP=512, NE=4, GPT-2 50K vocab)
+### Gen 2 — MoHE 28M/91M (archived)
 
-| Config | Data | ppL | Note |
-|--------|------|-----|------|
-| depth=1 | WikiText-103 3M | 163.5 | Stable training |
-| depth=2 (continuation) | same | **133.3** | +30ppL from depth |
-| depth=1 | FW+SC+Math 200M | ~1920 | Pre-K3-Light, ~5.89s/step |
+4-expert MoE with GPT-2 vocab. Plateau at ppl≈3665.
 
-### Legacy: SNN v2 15.3M (CANN + SSM + temporal gating)
+### Gen 1 — CANN-SSM 15M (archived)
 
-| Model | Param | ppl (WikiText-103) | O(T) | Online learning |
-|-------|-------|-------------------|------|-----------------|
-| SNN v2 | 15.3M | **34.7** | ✅ | ✅ |
-| GPT-2 | 14.2M | 34.8 | ❌ | ❌ |
+Hybrid SSM + CANN with temporal gating. ppl=34.7 on WikiText-103.
 
-## K3 Light GPU Kernel
-
-K3 Light splits the per-step computation into two stages:
-
-1. **PyTorch batch gates** — all positions × all experts' gate_a/b/proj_in as single batched matmul (cuBLAS)
-2. **FusedLightFunction** (attractor only) — `h_fast = a·h + b·x` → field → field_mix → LN → slow_gate → h_out, all in one CUDA kernel
-
-| Version | launches/step | Speed | Backward |
-|---------|--------------|-------|----------|
-| Old K3 full | 1 (+9 saved tensors) | ~5.89s | manual grad management |
-| **K3 Light** | **1 (attractor only)** | **~2.95s (2×)** | **pure autograd** |
-
-Files: `rina/kernels/attractor.py` (forward kernel + backward kernel + FusedLightFunction autograd Function).
-Training loop is fully autograd — `finish_training_step()` is a no-op.
-
-### Bug fixes applied to all forward kernels
-
-| Bug | Cause | Fix |
-|-----|-------|-----|
-| field_mix race | shared memory overwritten by subsequent loop iterations | separate tmp buffer + copy-back |
-| LN write race | same pattern | same fix |
-| gate bias multiplied 256× | sb[e] added per-thread, then tree-reduction summed all threads | add bias after reduction |
-
-## Training
+## Quick Start
 
 ```bash
-# 83M MoHE (current experiment)
-python experiments/mohe_83m_run.py     # FineWeb+StarCoder+Math 200M
-                                       # depth=3, route_noise=0.1, dropout=0.1
+# Install
+pip install -r requirements.txt
 
-# 28M MoHE (WikiText ablation)
-python experiments/mohe_multiexpert.py  # WikiText-103 3M → ppL 133 (depth=2)
+# Train (resume from checkpoint or from init)
+python experiments/mohe_transferred_train.py
 
-# Legacy SNN v2 15.3M
-python scripts/train_snn_15m.py        # WikiText-103 38M → ppl 34.7
+# Generate
+python experiments/generate.py
+
+# Prepare data (500M FW+SC+Math+Chinese)
+python experiments/prepare_data_rwkv.py
+
+# Weight transfer (RWKV-7 → MoHE-RWKV init)
+python experiments/weight_transfer.py
 ```
 
-## Package Structure
+## Package
 
 ```
 rina/
-  mohe.py            — MoHE model (entry point)
-  kernels/
-    __init__.py       — exports FusedLightFunction
-    attractor.py      — K3 Light: fused forward + backward + autograd Function
-  sample.py           — adaptive temperature + top-p sampling
+  __init__.py            ← from rina import MoHERWKV, sample, TRIE_TOKENIZER
+  model.py               ← MoHE-RWKV (WKV7Fn + AttractorExpert + MoHERWKV)
+  sample.py              ← Adaptive temperature + top-p sampling
+  rwkv_tokenizer.py      ← RWKV trie tokenizer (rwkv_vocab_v20230424)
 
-rina/ (legacy, deprecated)
-  cell.py, model.py, slot.py, config.py, drift.py, niah.py
+experiments/             ← Current generation scripts
+  mohe_transferred_train.py
+  generate.py
+  prepare_data_rwkv.py
+  weight_transfer.py
 
-experiments/
-  mohe_83m_run.py     — 83M main training
-  mohe_large_run.py   — 28M main training
-  mohe_multiexpert.py — WikiText MoHE ablation
+kernels/                 ← WKV CUDA kernel (float32, head=64)
+  rwkv7_clampw.cu / .cpp
 
-archive/dead_rina/    — dead files removed from rina/ (scan.py, cuda_graph.py, data.py, fix_bwd.py)
+archives/                ← Previous generations
+  gen1_cann_ssm/         (CANN-SSM 15M-25M)
+  gen2_mohe/             (MoHE 28M/91M, GPT-2 vocab)
 ```
 
 ## Hardware
@@ -101,10 +81,10 @@ ROG Zephyrus M16 2022 — RTX 3070 Ti Laptop (8 GB)
 
 ## References
 
-- `docs/RINA实验日志.md` — full experiment log (~6500 lines)
+- `docs/RINA实验日志.md` — full experiment log
 - `docs/RINA_实验总览.md` — condensed experiment overview
+- `docs/ARCH.md` — architecture & training recipe
 - `ORIGIN.md` — project philosophy
-- `docs/KVR_实验全记录.md` — predecessor experiment
 
 ## Contact
 
@@ -112,114 +92,93 @@ rapidsound@163.com / mikotomisaka477@gmail.com
 
 ---
 
-# RINA — Retrieval Is Not Always Needed
+# RINA (Retrieval Is Not Always Needed) — MoHE-RWKV
 
-MoHE（Mixture of Hebbian Experts）——门控双记忆线性递回 + Depth-of-Thought。
+109M 语言模型，逐 token 专家路由、深度迭代精化、RWKV-v7 线性递回。
+
+## 架构
 
 ```
-快记忆: h_fast = a·h_{t-1} + b·x_t          ← SSM 门控（每专家）
-慢记忆: P = patterns.T @ patterns             ← Hebbian 联想场
-融合:   h_out = h_fast + gate·field_force     ← 门控双记忆
-
-Depth-of-Thought: 每 token 多轮迭代精化
-赢家通吃 Hebbian + 输家抑制 → 领域自然分化
+Embed → WKV (RWKV-v7) → [depth×3: Router → 12×AttractorExpert → Consolidate] → Head
 ```
 
-## 实验结果
+| 组件 | 细节 |
+|------|------|
+| 时间递回 | RWKV-v7 WKV CUDA kernel (head 64, H=12, float32) |
+| 专家 | Attractor: `h + gate · field`, `field = h @ (P^T·P) → Proj → FieldMix → LN` |
+| 路由 | 逐 token, topk=2, ×3.0 缩放, 无跨步平滑 |
+| 深度迭代 | 3 轮 `h = h_new` 链式传递 (DoT-like) |
+| 参数量 | 109.44M (embed 50.3M + expert 55.0M + 其他 4.1M) |
 
-### 83M（DM=1024, NP=512, NE=4, GPT-2 50K 词表, weight tying）
+## 当前结果
 
-| 配置 | 数据 | 速度 | 状态 |
-|------|------|------|------|
-| depth=1 | FineWeb+StarCoder+Math 200M | ~2.95s/step（K3 Light） | loss=8.1 平台期，专家趋同 |
-| **depth=3+noise+dropout** | 同上 | 运行中 | **当前** |
+### Gen 3 — MoHE-RWKV 109M (当前)
 
-depth=1 时专家趋同（exp_sim 0.80→0.91，step 1000 起 loss 持平）。
-已通过 depth=3、router noise（σ=0.1）、expert dropout（p=0.1）、aux_loss_weight=0.5 缓解。
+- **ppl=4.9**, val_ppl=4.3, 路由熵=0.5 (已分化)
+- **SEQ=512, BSZ=4, ~2 it/s** (前代 54× 吞吐)
+- 500M token: FW(50%) + SC(20%) + Math(15%) + 中文(15%)
+- LR: 3e-4 → cosine → 3e-5, 90000 步
 
-### 28M（DM=256, NP=512, NE=4, GPT-2 50K 词表）
+### Gen 2 — MoHE 28M/91M (已归档)
 
-| 配置 | 数据 | ppL | 备注 |
-|------|------|-----|------|
-| depth=1 | WikiText-103 3M | 163.5 | 稳定训练 |
-| depth=2（续训） | 同上 | **133.3** | 二轮迭代 +30 ppL |
-| depth=1 | FW+SC+Math 200M | ~1920 | K3 Light 前，~5.89s/step |
+4 专家 MoE + GPT-2 词表。平台期 ppl≈3665。
 
-### 前代：SNN v2 15.3M（CANN + SSM + 时序门控）
+### Gen 1 — CANN-SSM 15M (已归档)
 
-| 模型 | 参数量 | ppl（WikiText-103） | O(T) | 在线学习 |
-|------|--------|-------------------|------|---------|
-| SNN v2 | 15.3M | **34.7** | ✅ | ✅ |
-| GPT-2 | 14.2M | 34.8 | ❌ | ❌ |
+SSM + CANN 混合 + 时序门控。WikiText-103 ppl=34.7。
 
-## K3 Light GPU 算子
-
-K3 Light 将每步计算拆为两阶段：
-
-1. **PyTorch batch gates** — 所有位置×所有 expert 的 gate_a/b/proj_in 一次 batched matmul（cuBLAS）
-2. **FusedLightFunction**（attractor only）— `h_fast = a·h + b·x` → field → field_mix → LN → slow_gate → h_out，一个 CUDA kernel 完成
-
-| 版本 | launch 数 | 速度 | 反向 |
-|------|----------|------|------|
-| 旧 K3 完整 | 1（+9 中间 tensor） | ~5.89s | 手动 grad 管理 |
-| **K3 Light** | **1（attractor only）** | **~2.95s（2×）** | **纯 autograd** |
-
-文件：`rina/kernels/attractor.py`（前向 kernel + 反向 kernel + FusedLightFunction autograd Function）。
-训练循环全 autograd — `finish_training_step()` 是 no-op。
-
-### 修复的所有前向 kernel bug
-
-| Bug | 原因 | 修复 |
-|-----|------|------|
-| field_mix 竞争 | 共享内存被后续循环覆写 | 独立 tmp buffer + 拷回 |
-| LN 写竞争 | 同上 | 同上 |
-| gate bias 被 256 个线程重复加 | sb[e] 每个线程初始，tree reduction 累加 256× | 改为 reduction 后加 bias |
-
-## 训练
+## 快速开始
 
 ```bash
-# 83M MoHE（当前实验）
-python experiments/mohe_83m_run.py     # FineWeb+StarCoder+Math 200M
-                                       # depth=3, route_noise=0.1, dropout=0.1
+# 安装依赖
+pip install -r requirements.txt
 
-# 28M MoHE（WikiText 消融）
-python experiments/mohe_multiexpert.py  # WikiText-103 3M → ppL 133（depth=2）
+# 训练 (自动续训或从初始化权重开始)
+python experiments/mohe_transferred_train.py
 
-# 前代 SNN v2 15.3M
-python scripts/train_snn_15m.py        # WikiText-103 38M → ppl 34.7
+# 生成测试
+python experiments/generate.py
+
+# 准备数据 (FW+SC+Math+中文 500M)
+python experiments/prepare_data_rwkv.py
+
+# 权重迁移 (RWKV-7 → MoHE-RWKV)
+python experiments/weight_transfer.py
 ```
 
 ## 包结构
 
 ```
 rina/
-  mohe.py            — MoHE 模型（入口）
-  kernels/
-    __init__.py       — 导出 FusedLightFunction
-    attractor.py      — K3 Light：融合前向+反向+autograd Function
-  sample.py           — 自适应温度 + top-p 采样
+  __init__.py            ← from rina import MoHERWKV, sample, TRIE_TOKENIZER
+  model.py               ← MoHE-RWKV (WKV7Fn + AttractorExpert + MoHERWKV)
+  sample.py              ← 自适应温度 + top-p 采样
+  rwkv_tokenizer.py      ← RWKV trie tokenizer (rwkv_vocab_v20230424)
 
-rina/（前代，已标注 deprecated）
-  cell.py, model.py, slot.py, config.py, drift.py, niah.py
+experiments/             ← 当前代实验脚本
+  mohe_transferred_train.py
+  generate.py
+  prepare_data_rwkv.py
+  weight_transfer.py
 
-experiments/
-  mohe_83m_run.py     — 83M 主线训练
-  mohe_large_run.py   — 28M 主线训练
-  mohe_multiexpert.py — WikiText MoHE 消融
+kernels/                 ← WKV CUDA kernel (float32, head=64)
+  rwkv7_clampw.cu / .cpp
 
-archive/dead_rina/    — 从 rina/ 移出的死文件（scan.py, cuda_graph.py, data.py, fix_bwd.py）
+archives/                ← 前代归档
+  gen1_cann_ssm/         (CANN-SSM 15M-25M)
+  gen2_mohe/             (MoHE 28M/91M, GPT-2 词表)
 ```
 
 ## 硬件
 
-ROG Zephyrus M16 2022 — RTX 3070 Ti Laptop（8 GB）
+ROG Zephyrus M16 2022 — RTX 3070 Ti Laptop (8 GB)
 
 ## 参考
 
-- `docs/RINA实验日志.md` — 完整实验记录（~6500 行）
+- `docs/RINA实验日志.md` — 完整实验记录
 - `docs/RINA_实验总览.md` — 整理版实验概览
+- `docs/ARCH.md` — 架构与训练配方
 - `ORIGIN.md` — 项目哲学
-- `docs/KVR_实验全记录.md` — 前代实验
 
 ## 联系方式
 

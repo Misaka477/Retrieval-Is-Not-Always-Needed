@@ -1,1 +1,0 @@
-from .attractor import FusedLightFunction
