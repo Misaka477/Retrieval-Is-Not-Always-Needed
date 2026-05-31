@@ -5,21 +5,22 @@ from datasets import load_dataset
 from tqdm import tqdm
 import torch
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-CKPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkpoints")
+CKPT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "checkpoints")
 os.makedirs(CKPT_DIR, exist_ok=True)
 
 VOCAB_FILE = os.path.join(CKPT_DIR, "rwkv_vocab_v20230424.txt")
 SEQ = 128
 NUM_WORKERS = 8
 
-# 50% FW + 20% SC + 15% Math + 15% Chinese = 500M tokens
+# 1B tokens: DCLM 30% + SC 20% + Math 20% + ArXiv 15% + Chinese 15%
 TARGETS = [
-    ("FW", "HuggingFaceFW/fineweb", "sample-10BT", "train", 0.50, 250_000_000),
-    ("SC", "bigcode/starcoderdata", None, "train", 0.20, 100_000_000),
-    ("Math", "open-web-math/open-web-math", None, "train", 0.15, 75_000_000),
-    ("Chinese", "Skywork/SkyPile-150B", None, "train", 0.15, 75_000_000),
+    ("DCLM", "mlfoundations/dclm-baseline-1.0", None, "train", 0.30, 300_000_000, "text", None),
+    ("SC", "bigcode/starcoderdata", None, "train", 0.20, 200_000_000, "content", None),
+    ("Math", "open-web-math/open-web-math", None, "train", 0.20, 200_000_000, "text", None),
+    ("ArXiv", "monology/pile-uncopyrighted", None, "train", 0.15, 150_000_000, "text", "ArXiv"),
+    ("Chinese", "Skywork/SkyPile-150B", None, "train", 0.15, 150_000_000, "text", None),
 ]
 
 from rina.rwkv_tokenizer import TRIE_TOKENIZER
@@ -29,30 +30,38 @@ print(f"  Vocab: {len(_tokenizer.idx2token)} tokens")
 
 
 def np_save_chunked(path, arr):
-    buf = io.BytesIO()
-    np.save(buf, arr)
-    data = buf.getvalue()
-    CHUNK = 64 * 1024 * 1024
-    with open(path, 'wb') as f:
-        for i in range(0, len(data), CHUNK):
-            f.write(data[i:i + CHUNK])
+    tmp = path.replace('.npy', '_tmp.npy')
+    try:
+        np.save(tmp, arr)
+        os.replace(tmp, path)
+    except Exception as e:
+        np.save(path, arr)
 
 
 def _tokenize_batch(texts):
     return [_tokenizer.encode(t) for t in texts]
 
 
-def load_or_tokenize(name, src, cfg, split, max_tokens, cache_name):
+def load_or_tokenize(name, src, cfg, split, max_tokens, cache_name, field="text", pile_filter=None):
     cache_path = os.path.join(CKPT_DIR, cache_name)
     if os.path.exists(cache_path):
         ids = np.load(cache_path, mmap_mode='r')
-        print(f"  {name}: {len(ids):,} tokens (cached)")
-        return torch.from_numpy(ids)
+        if len(ids) >= max_tokens:
+            print(f"  {name}: {len(ids):,} tokens (cached)")
+            return torch.from_numpy(ids)
+        print(f"  {name}: partial cache ({len(ids):,}/{max_tokens:,}), resuming...")
     print(f"  Loading {name} ({max_tokens:,} tokens)...")
     ds = load_dataset(src, cfg, split=split, streaming=True)
-    ds = ds.shuffle(seed=42, buffer_size=10000)
+    if pile_filter is None:
+        ds = ds.shuffle(seed=42, buffer_size=10000)
     arr = np.empty(max_tokens, dtype=np.int32)
-    pos = 0
+    pos = 0; last_save = 0
+    if os.path.exists(cache_path):
+        cached = np.load(cache_path, mmap_mode='r')
+        arr[:len(cached)] = cached
+        pos = len(cached)
+        last_save = pos
+        print(f"    {pos:,} tokens loaded from partial cache")
     pool = ThreadPoolExecutor(max_workers=NUM_WORKERS)
     batch = []
     it = iter(ds)
@@ -64,7 +73,9 @@ def load_or_tokenize(name, src, cfg, split, max_tokens, cache_name):
                 s = next(it)
             except StopIteration:
                 break
-            text = s.get("text", s.get("content", ""))
+            if pile_filter and s.get("meta", {}).get("pile_set_name") != pile_filter:
+                continue
+            text = s.get(field, "")
             if len(text) < 200:
                 continue
             batch.append(text)
@@ -85,6 +96,9 @@ def load_or_tokenize(name, src, cfg, split, max_tokens, cache_name):
                 futures = []
                 if pos >= max_tokens:
                     break
+            if pos - last_save >= 10_000_000:
+                np_save_chunked(cache_path, arr[:pos])
+                last_save = pos
         if batch:
             futures.append(pool.submit(_tokenize_batch, batch))
         for f in as_completed(futures):
@@ -105,20 +119,19 @@ def load_or_tokenize(name, src, cfg, split, max_tokens, cache_name):
 
 
 all_ids = []
-for name, src, cfg, split, ratio, max_tok in TARGETS:
+total_tokens = 0
+for idx, (name, src, cfg, split, ratio, max_tok, field, pile_filter) in enumerate(TARGETS):
     cache = f"mohe_raw_{name.lower()}_rwkv.npy"
-    ids = load_or_tokenize(name, src, cfg, split, max_tok, cache)
+    ids = load_or_tokenize(name, src, cfg, split, max_tok, cache, field, pile_filter)
     ids = ids[:max_tok]
-    all_ids.append(ids)
+    all_ids.append(ids.numpy())
+    total_tokens += len(ids)
     print(f"  {name}: taking {len(ids):,} tokens ({ratio*100:.0f}%)")
+    partial = np.concatenate(all_ids)
+    np.random.shuffle(partial)
+    np_save_chunked(os.path.join(CKPT_DIR, "mohe_fw_rwkv_1b.npy"), partial)
+    del partial
+    print(f"  Partial combined saved ({total_tokens:,} tokens so far)")
 
-ids = torch.cat(all_ids)
-perm = torch.randperm(len(ids))
-ids = ids[perm].numpy()
-
-out_path = os.path.join(CKPT_DIR, "mohe_fw_rwkv.npy")
-np_save_chunked(out_path, ids)
-print(f"\nSaved combined dataset to {out_path}")
-print(f"  Total tokens: {len(ids):,}")
+print(f"\nAll sources complete: {total_tokens:,} tokens")
 print(f"  Composition: " + " + ".join(f"{t[0]} {int(t[4]*100)}%" for t in TARGETS))
-print(f"  Max token ID: {ids.max()}, Min: {ids.min()}")

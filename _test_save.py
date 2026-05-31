@@ -1,0 +1,11 @@
+import numpy as np, tempfile, os
+t = tempfile.mktemp(suffix='.npy')
+a = np.zeros(10000000, dtype=np.int32)
+print(f'Array size: {a.nbytes/1024/1024:.0f} MB, contiguous: {a.flags.c_contiguous}')
+np.save(t, a[:5000000])
+print(f'Saved 5M: {os.path.getsize(t)} bytes, exists: {os.path.exists(t)}')
+np.save(t + '.tmp', a[:5000000])
+print(f'Saved .tmp: exists={os.path.exists(t+".tmp")}')
+os.remove(t)
+os.remove(t + '.tmp')
+print('All OK')

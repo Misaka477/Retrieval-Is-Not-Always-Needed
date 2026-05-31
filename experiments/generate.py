@@ -43,7 +43,8 @@ with torch.no_grad():
         gen = tokens[:]
         for _ in range(200):
             inp = torch.tensor([gen[-SEQ:]], device=device)
-            logits = model(inp)[0, -1, :]
+            out = model(inp)
+            logits = (out[0] if isinstance(out, tuple) else out)[0, -1, :]
             gen.append(sample(logits).item())
         text = tokenizer.decodeBytes(gen).decode('utf-8', errors='replace')
         print(f"\nPrompt: {prompt}")
