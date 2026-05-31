@@ -68,12 +68,12 @@ def eval_val():
     return float(torch.exp(torch.tensor(vl / max(vc, 1))))
 
 nb = (len(ids_train)-1)//(BSZ*SEQ)
-N_STEPS = min(nb, 500000)
+N_STEPS = max(start_step, nb) + nb  # full epoch from start_step
 perm = torch.randperm(nb)
 
 pbar = tqdm(range(start_step, N_STEPS), initial=start_step, total=N_STEPS)
 for bi in pbar:
-    s = perm[bi] * BSZ * SEQ
+    s = perm[bi % nb] * BSZ * SEQ
     x = ids[s:s+BSZ*SEQ].view(BSZ, SEQ).to(device, dtype=torch.long)
     opt.zero_grad()
     logits = model(x)
