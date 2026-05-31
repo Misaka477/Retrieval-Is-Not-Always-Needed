@@ -68,7 +68,7 @@ def eval_val():
     return float(torch.exp(torch.tensor(vl / max(vc, 1))))
 
 nb = (len(ids_train)-1)//(BSZ*SEQ)
-N_STEPS = nb  # one pass over all data
+N_STEPS = max(start_step, nb) + nb  # full epoch of new data
 perm = torch.randperm(nb)
 
 pbar = tqdm(range(start_step, N_STEPS), initial=start_step, total=N_STEPS)
