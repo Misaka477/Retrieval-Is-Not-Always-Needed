@@ -7,7 +7,7 @@ from rina import MoHERWKV
 
 device = 'cuda'
 VOCAB, DM, NP = 65536, 768, 1536
-BSZ, SEQ = 4, 4096
+BSZ, SEQ = 2, 4096
 LR = 3e-4
 CKPT_DIR = 'checkpoints'
 RESUME_CKPT = os.path.join(CKPT_DIR, 'mohe_transferred_latest.pt')
