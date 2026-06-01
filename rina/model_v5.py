@@ -65,6 +65,8 @@ class MoHERWKV_V5(nn.Module):
         self.tmix_v = nn.Linear(dm, dm, bias=False)
         self.tmix_a = nn.Linear(dm, dm, bias=False)
         self.router.weight.data.mul_(2.0)
+        self.head.bias = nn.Parameter(torch.full([vocab], -10.8))
+        self.head.bias.data.fill_(-10.8)
 
     def forward(self, x):
         device, B, T = x.device, *x.shape
