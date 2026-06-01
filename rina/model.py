@@ -74,7 +74,7 @@ class AttractorExpert(nn.Module):
         return h_in + gate * field
 
 class MoHERWKV(nn.Module):
-    def __init__(self, vocab, dm, np_, n_experts=4, aux_loss_weight=0.1, route_noise=0.0, topk=0, wkv_no_grad=False):
+    def __init__(self, vocab, dm, np_, n_experts=4, aux_loss_weight=0.1, route_noise=0.0, topk=0, wkv_no_grad=False, soft_routing=False):
         super().__init__()
         self.aux_loss_weight = aux_loss_weight; self.route_noise = route_noise; self.dm = dm; self.n_experts = n_experts; self.wkv_no_grad = wkv_no_grad
         _load_wkv7()
@@ -86,7 +86,7 @@ class MoHERWKV(nn.Module):
         self.tmix_k = nn.Linear(dm,dm,bias=False); self.tmix_v = nn.Linear(dm,dm,bias=False)
         self.tmix_a = nn.Linear(dm,dm,bias=False)
         self.consolidate = nn.Linear(dm*n_experts,dm); self.consolidate_norm = nn.LayerNorm(dm)
-        self.topk = topk
+        self.topk = topk; self.soft_routing = soft_routing
         self.router_bias = nn.Parameter(torch.randn(n_experts) * 0.5); self.expert_norm = nn.LayerNorm(dm)
         self.router.weight.data.mul_(2.0)
 
@@ -114,7 +114,9 @@ class MoHERWKV(nn.Module):
             self._last_route_entropy = -(route_weights*torch.log(route_weights.clamp(min=1e-10))).sum(-1).mean().item()
             h_exps = torch.stack([e(h, emb) for e in self.experts], dim=0)
             h_exps = self.expert_norm(h_exps.permute(1,2,0,3).reshape(-1,D)).reshape(B,T,self.n_experts,D)
-            if self.topk > 0 and self.topk < self.n_experts:
+            if self.soft_routing:
+                h_exps = h_exps * route_weights.unsqueeze(-1)  # soft weight all experts
+            elif self.topk > 0 and self.topk < self.n_experts:
                 _, inds = route_weights.topk(self.topk,dim=-1)
                 mask = torch.zeros(B,T,self.n_experts,device=device).scatter_(-1,inds,1)
                 h_exps = h_exps * mask.unsqueeze(-1)
