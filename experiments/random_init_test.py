@@ -7,7 +7,7 @@ from rina import MoHERWKV
 
 device = 'cuda'
 VOCAB, DM, NP = 65536, 768, 1536
-BSZ, SEQ = 2, 4096
+BSZ, SEQ = 8, 4096
 LR = 3e-4; N_STEPS = 5000; SAVE_EVERY = 500
 DATA_PATH = 'checkpoints/mohe_fw_rwkv_1b.npy'
 CKPT_DIR = 'checkpoints'
