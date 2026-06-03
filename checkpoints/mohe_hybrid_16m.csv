@@ -1,2 +1,0 @@
-step,ppl,loss,lr,exp_sim,gate_ratio,grad_norm,aux_loss
-200,299.1,2.22,3.00e-04,0.0000,0.0000,0.4673,0.674184

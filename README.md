@@ -1,78 +1,82 @@
-# RINA (Retrieval Is Not Always Needed) — MoHE-RWKV
+# RINA (Retrieval Is Not Always Needed) — AR + Stateful Diffusion
 
-109M language model with per-token expert routing, depth-of-thought iteration, and RWKV-v7 linear recurrence.
+State diffusion on frozen RWKV-v7 backbone: a stateful SSM denoiser corrects AR hidden states to improve generation quality.
 
 ## Architecture
 
 ```
-Embed → WKV (RWKV-v7) → [depth×3: Router → 12×AttractorExpert → Consolidate] → Head
+RWKV-v7 12L backbone (frozen, return_h=True)
+  → h [768] → Stateful SSM Denoiser → h' → Head → logits → token
 ```
 
 | Component | Detail |
 |-----------|--------|
-| Time mixing | RWKV-v7 WKV CUDA kernel (head 64, H=12, float32) |
-| Expert | Attractor: `h + gate · field`, `field = h @ (P^T·P) → Proj → FieldMix → LN` |
-| Routing | Per-token, topk=2, ×3.0 scaling, no cross-step smoothing |
-| Depth | 3 iterations with `h = h_new` chain (DoT-like) |
-| Params | 109.44M (embed 50.3M + expert 55.0M + others 4.1M) |
+| Backbone | Official RWKV-v7 12L, 0.1B, CUDA kernel (wkv7_fp32), squared ReLU FFN |
+| Denoiser | SSM: `s_t = sigmoid(log_A)·s_{t-1} + B·proj(concat(h, cond))`; gated residual readout |
+| Training | Per-step GT token logprob: `CE(head(h'), gt) + 0.1·MSE(h', h)` |
+| Condition | `softmax(logits)·head.weight` → predicted next embedding |
+| Confidence head | `Linear(768→128→1)→Sigmoid`, label = `logprob_after(gt) > logprob_before(gt)` |
 
-## Current Results
+## Current Status
 
-### Gen 3 — MoHE-RWKV 109M (current)
+### v3 — Stateful SSM Denoiser (current, in training)
 
-- **ppl=4.9**, val_ppl=4.3, route entropy=0.5 (differentiated)
-- **SEQ=512, BSZ=4, ~2 it/s** (54× throughput over previous arch)
-- 500M tokens: FW(50%) + SC(20%) + Math(15%) + Chinese(15%)
-- LR: 3e-4 → cosine → 3e-5 over 90000 steps
+- 20000 trajectories × 16 steps = 320000 AR states with GT token labels
+- Stateful SSM processes trajectories sequentially (BPTT-style)
+- Training objective: maximize per-step logprob of GT token + KL regularization
+- See `docs/RINA_实验总览.md §12` for details
 
-### Gen 2 — MoHE 28M/91M (archived)
+### v2 — Stateless MLP + Confidence Head (diagnosed)
 
-4-expert MoE with GPT-2 vocab. Plateau at ppl≈3665.
+- MLP denoiser improved 3/4 prompts
+- Confidence head (entropy-based labels) unreliable — Romeo case mis-blocked, Capital of France case mis-released
+- Diagnosis: entropy ≠ quality; switched to GT-token-based labels for v3
 
-### Gen 1 — CANN-SSM 15M (archived)
+### v1 — MoHE-RWKV 109M (archived)
 
-Hybrid SSM + CANN with temporal gating. ppl=34.7 on WikiText-103.
+Attractor MoE with RWKV-v7 backbone. ppl=4.9, route differentiated. Abandoned due to attractor collapse.
 
 ## Quick Start
 
 ```bash
 # Install
-pip install -r requirements.txt
+pip install torch numpy tqdm
 
-# Train (resume from checkpoint or from init)
-python experiments/mohe_transferred_train.py
+# Train stateful denoiser (Phase 0 + Phase 1)
+python rina/train_ar.py
 
-# Generate
-python experiments/generate.py
+# Train confidence head
+python rina/train_conf.py
 
-# Prepare data (500M FW+SC+Math+Chinese)
-python experiments/prepare_data_rwkv.py
-
-# Weight transfer (RWKV-7 → MoHE-RWKV init)
-python experiments/weight_transfer.py
+# Evaluate
+python rina/eval_multi.py
 ```
 
 ## Package
 
 ```
 rina/
-  __init__.py            ← from rina import MoHERWKV, sample, TRIE_TOKENIZER
-  model.py               ← MoHE-RWKV (WKV7Fn + AttractorExpert + MoHERWKV)
-  sample.py              ← Adaptive temperature + top-p sampling
-  rwkv_tokenizer.py      ← RWKV trie tokenizer (rwkv_vocab_v20230424)
+  rwkv_v7_demo.py          ← RWKV-v7 backbone (patched kernel + return_h)
+  train_ar.py              ← Stateful denoiser training (Phase 0 + Phase 1)
+  train_conf.py            ← Confidence head training
+  eval_multi.py            ← Multi-prompt comparison
+  __init__.py              ← RWKV, RWKV_TOKENIZER, StatefulDenoiser, run_model
 
-experiments/             ← Current generation scripts
-  mohe_transferred_train.py
-  generate.py
-  prepare_data_rwkv.py
-  weight_transfer.py
+kernels/
+  wkv7_fp32.cu / .cpp      ← CUDA kernel (WindBackstepping, fp32 + backward)
 
-kernels/                 ← WKV CUDA kernel (float32, head=64)
-  rwkv7_clampw.cu / .cpp
+checkpoints/
+  mohe_fw_rwkv_1b.npy      ← Training data (3.7GB)
+  rwkv_vocab_v20230424.txt
+  ar_trajs.pt              ← v3 trajectory data
+  dn_stateful_final.pt     ← v3 trained denoiser
 
-archives/                ← Previous generations
-  gen1_cann_ssm/         (CANN-SSM 15M-25M)
-  gen2_mohe/             (MoHE 28M/91M, GPT-2 vocab)
+docs/
+  RINA实验日志.md           ← Full experiment log (8200+ lines)
+  RINA_实验总览.md           ← Condensed experiment overview
+  DLM_survey.md             ← Diffusion LM literature review
+
+archive/                   ← Previous generations (CANN, MoHE)
 ```
 
 ## Hardware
@@ -83,8 +87,7 @@ ROG Zephyrus M16 2022 — RTX 3070 Ti Laptop (8 GB)
 
 - `docs/RINA实验日志.md` — full experiment log
 - `docs/RINA_实验总览.md` — condensed experiment overview
-- `docs/ARCH.md` — architecture & training recipe
-- `ORIGIN.md` — project philosophy
+- `docs/DLM_survey.md` — diffusion LM survey
 
 ## Contact
 
@@ -92,81 +95,85 @@ rapidsound@163.com / mikotomisaka477@gmail.com
 
 ---
 
-# RINA (Retrieval Is Not Always Needed) — MoHE-RWKV
+# RINA (Retrieval Is Not Always Needed) — AR + Stateful Diffusion
 
-109M 语言模型，逐 token 专家路由、深度迭代精化、RWKV-v7 线性递回。
+在冻结的 RWKV-v7 backbone 上做状态扩散：一个 stateful SSM denoiser 修正 AR hidden state 来改善生成质量。
 
 ## 架构
 
 ```
-Embed → WKV (RWKV-v7) → [depth×3: Router → 12×AttractorExpert → Consolidate] → Head
+RWKV-v7 12L backbone（冻结，return_h=True）
+  → h [768] → Stateful SSM Denoiser → h' → Head → logits → token
 ```
 
 | 组件 | 细节 |
 |------|------|
-| 时间递回 | RWKV-v7 WKV CUDA kernel (head 64, H=12, float32) |
-| 专家 | Attractor: `h + gate · field`, `field = h @ (P^T·P) → Proj → FieldMix → LN` |
-| 路由 | 逐 token, topk=2, ×3.0 缩放, 无跨步平滑 |
-| 深度迭代 | 3 轮 `h = h_new` 链式传递 (DoT-like) |
-| 参数量 | 109.44M (embed 50.3M + expert 55.0M + 其他 4.1M) |
+| Backbone | 官方 RWKV-v7 12L, 0.1B, CUDA kernel (wkv7_fp32), squared ReLU FFN |
+| Denoiser | SSM: `s_t = sigmoid(log_A)·s_{t-1} + B·proj(concat(h, cond))`; 门控残差读出 |
+| 训练目标 | 每步 GT token logprob: `CE(head(h'), gt) + 0.1·MSE(h', h)` |
+| 条件信号 | `softmax(logits)·head.weight` → 预测的下一个 token embedding |
+| 置信度头部 | `Linear(768→128→1)→Sigmoid`, 标签 = `logprob_after(gt) > logprob_before(gt)` |
 
-## 当前结果
+## 当前状态
 
-### Gen 3 — MoHE-RWKV 109M (当前)
+### v3 — Stateful SSM Denoiser（当前，训练中）
 
-- **ppl=4.9**, val_ppl=4.3, 路由熵=0.5 (已分化)
-- **SEQ=512, BSZ=4, ~2 it/s** (前代 54× 吞吐)
-- 500M token: FW(50%) + SC(20%) + Math(15%) + 中文(15%)
-- LR: 3e-4 → cosine → 3e-5, 90000 步
+- 20000 轨迹 × 16 步 = 320000 个带 GT token 标签的 AR 状态
+- Stateful SSM 按轨迹序列处理（BPTT 式训练）
+- 训练目标：最大化 GT token 的每步 logprob + KL 正则化
+- 详见 `docs/RINA_实验总览.md §12`
 
-### Gen 2 — MoHE 28M/91M (已归档)
+### v2 — Stateless MLP + Confidence Head（已诊断）
 
-4 专家 MoE + GPT-2 词表。平台期 ppl≈3665。
+- MLP denoiser 改善 3/4 prompt
+- Confidence head（entropy-based label）不可靠——Romeo 误拦截、Capital of France 误放行
+- 诊断：entropy ≠ 质量，v3 切换为 GT token logprob 标签
 
-### Gen 1 — CANN-SSM 15M (已归档)
+### v1 — MoHE-RWKV 109M（已归档）
 
-SSM + CANN 混合 + 时序门控。WikiText-103 ppl=34.7。
+Attractor MoE + RWKV-v7 backbone。ppl=4.9，路由已分化。因 attractor 坍缩放弃。
 
 ## 快速开始
 
 ```bash
 # 安装依赖
-pip install -r requirements.txt
+pip install torch numpy tqdm
 
-# 训练 (自动续训或从初始化权重开始)
-python experiments/mohe_transferred_train.py
+# 训练 stateful denoiser（Phase 0 + Phase 1）
+python rina/train_ar.py
 
-# 生成测试
-python experiments/generate.py
+# 训练 confidence head
+python rina/train_conf.py
 
-# 准备数据 (FW+SC+Math+中文 500M)
-python experiments/prepare_data_rwkv.py
-
-# 权重迁移 (RWKV-7 → MoHE-RWKV)
-python experiments/weight_transfer.py
+# 评估
+python rina/eval_multi.py
 ```
 
 ## 包结构
 
 ```
 rina/
-  __init__.py            ← from rina import MoHERWKV, sample, TRIE_TOKENIZER
-  model.py               ← MoHE-RWKV (WKV7Fn + AttractorExpert + MoHERWKV)
-  sample.py              ← 自适应温度 + top-p 采样
-  rwkv_tokenizer.py      ← RWKV trie tokenizer (rwkv_vocab_v20230424)
+  rwkv_v7_demo.py          ← RWKV-v7 backbone（已 patch kernel + return_h）
+  train_ar.py              ← Stateful denoiser 训练（Phase 0 + Phase 1）
+  train_conf.py            ← Confidence head 训练
+  eval_multi.py            ← 多 prompt 对比
+  __init__.py              ← RWKV, RWKV_TOKENIZER, StatefulDenoiser, run_model
 
-experiments/             ← 当前代实验脚本
-  mohe_transferred_train.py
-  generate.py
-  prepare_data_rwkv.py
-  weight_transfer.py
+kernels/
+  wkv7_fp32.cu / .cpp      ← CUDA kernel（WindBackstepping, fp32 + backward）
 
-kernels/                 ← WKV CUDA kernel (float32, head=64)
-  rwkv7_clampw.cu / .cpp
+checkpoints/
+  mohe_fw_rwkv_1b.npy      ← 训练数据（3.7GB）
+  rwkv_vocab_v20230424.txt
+  ar_trajs.pt              ← v3 轨迹数据
+  dn_stateful_final.pt     ← v3 训练好的 denoiser
 
-archives/                ← 前代归档
-  gen1_cann_ssm/         (CANN-SSM 15M-25M)
-  gen2_mohe/             (MoHE 28M/91M, GPT-2 词表)
+docs/
+  RINA实验日志.md           ← 完整实验记录（8200+ 行）
+  RINA_实验总览.md           ← 整理版实验概览
+  DLM_survey.md             ← Diffusion LM 文献调研
+
+archive/                   ← 前代归档（CANN, MoHE）
 ```
 
 ## 硬件
@@ -177,8 +184,7 @@ ROG Zephyrus M16 2022 — RTX 3070 Ti Laptop (8 GB)
 
 - `docs/RINA实验日志.md` — 完整实验记录
 - `docs/RINA_实验总览.md` — 整理版实验概览
-- `docs/ARCH.md` — 架构与训练配方
-- `ORIGIN.md` — 项目哲学
+- `docs/DLM_survey.md` — Diffusion LM 文献调研
 
 ## 联系方式
 

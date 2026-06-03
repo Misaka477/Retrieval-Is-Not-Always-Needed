@@ -558,3 +558,98 @@ step    loss   ppl      exp_sim
 - SFT 完成后跑生成测试
 - 验证集 + benchmark（GSM8K / HumanEval）
 - 继续预训练扩充数据量
+
+---
+
+## 11. AR + State Diffusion（2026-06-02~03）
+
+**背景：** MoHE+RWKV 109M 方向放弃后（attractor MoE 坍缩），转向更直接的方案：冻结官方 RWKV-v7 12L backbone，在 AR 生成的 hidden state 上加一个 denoiser 做后处理。
+
+### 11.1 当前架构
+
+```
+官方 12L RWKV-v7 backbone（冻结 + return_h）
+  → h [768] → denoiser → h' → head → logits → token
+```
+
+**关键决策：** 训练时 denoiser 看到的 h 必须来自 AR 生成分布。之前所有尝试（训在随机数据 batch 上）都推飞了——这就是"训练分布 = 推理分布"原则。
+
+### 11.2 Phase 0：AR 状态采集
+
+| 参数 | 值 |
+|------|-----|
+| 种子 | 5000 条 × 16 tokens（来自 mohe_fw_rwkv_1b.npy） |
+| 生成 | 官方 12L backbone AR 16 步 |
+| 每步保存 | h [768] + cond（softmax(logits)·head.weight → embedding） |
+| 总量 | 80000 个 AR 生成状态 |
+| 耗时 | 34.5 分钟 |
+
+### 11.3 Phase 1：Stateless MLP Denoiser
+
+| 参数 | 值 |
+|------|-----|
+| 架构 | Linear(1536→1536) → GELU → Linear(1536→768)，residual |
+| 目标 | MSE(h_pred, h_clean)，reduction='sum'/BSZ |
+| 优化器 | AdamW, lr=1e-3, BSZ=128, 200000 步 |
+
+### 11.4 v2 实验结果（Denoiser + Confidence Head）
+
+**Denoiser 改善 3/4 prompt：**
+
+| Prompt | AR | AR+Dn | AR+Conf |
+|--------|----|-------|---------|
+| Capital of France? | ❌ 答非所问 | ❌ CoT 绕死 | ✅ 正确答案 |
+| Eiffel tower is in | ✅ Paris | ✅ 更详细 | ❌ 重复退化 |
+| Romeo and Juliet? | ❌ Julius Caesar | ✅ Shakespeare | ❌ Lady Macbeth |
+| Poem about a cat | ✅ 可读 | ✅ 最佳 | ✅ 中等可用 |
+
+**关键诊断：** Conf head 标签（entropy 下降）不可靠——Romeo 案例 denoiser 修对了但熵升高（多峰分布），错误拦截；Capital of France 案例 denoiser 推向了 CoT 死胡同但熵降低，错误放行。
+
+---
+
+## 12. v3 Stateful SSM Denoiser（2026-06-04）
+
+**动机：** v2 的两个根因——(1) stateless MLP 每步独立修正，不知道前文修正方向 → CoT 绕死；(2) entropy label 不可靠。v3 同时解决两者。
+
+### 12.1 架构
+
+**Denoiser（Stateful SSM）：**
+
+```
+s_t = sigmoid(log_A)·s_{t-1} + B·proj(concat(h_t, cond_t))  # 跨步记忆
+h' = h + sigmoid(gate)·out(C·s_t)                             # 门控残差
+```
+
+**训练目标从 MSE proxy 改为直接质量反馈：**
+
+```python
+loss = CE(head(h'), gt_token) + 0.1 * MSE(h', h)
+```
+
+**Conf head 标签从 entropy 改为 GT token logprob：**
+
+```python
+label = 1 if logprob_after(gt_token, h') > logprob_before(gt_token, h)
+```
+
+### 12.2 数据升级
+
+| 维度 | v2 | v3 |
+|------|----|----|
+| 种子数 | 5000 | 20000 |
+| 状态数 | 80000（无序） | 320000（轨迹结构化） |
+| 每步标签 | 无 | GT token |
+| 训练方式 | 随机采样 | 按轨迹序列 BPTT |
+
+### 12.3 配套清理
+
+- 归档全部 CANN/MoHE 时代代码（experiments/、scripts/、旧 models/）
+- 删除死代码（rwkv_tokenizer.py、sample.py、旧 CSV）
+- 归档旧 kernel（rwkv7_clampw.*）
+
+### 12.4 待验证假设
+
+1. Stateful 跨步记忆 → 解决 Capital of France CoT 绕死（累积修正方向不漂移）
+2. GT token logprob label → 同时修掉 Romeo（错误拦截）和 Capital of France（错误放行）
+3. 如有效 → MoE Diffusion 延伸（多 expert stateful denoiser + EC router）
+
