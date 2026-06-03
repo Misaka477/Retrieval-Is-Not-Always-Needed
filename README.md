@@ -72,9 +72,7 @@ checkpoints/
   dn_stateful_final.pt     ← v3 trained denoiser
 
 docs/
-  RINA实验日志.md           ← Full experiment log (8200+ lines)
   RINA_实验总览.md           ← Condensed experiment overview
-  DLM_survey.md             ← Diffusion LM literature review
 
 archive/                   ← Previous generations (CANN, MoHE)
 ```
@@ -169,9 +167,7 @@ checkpoints/
   dn_stateful_final.pt     ← v3 训练好的 denoiser
 
 docs/
-  RINA实验日志.md           ← 完整实验记录（8200+ 行）
   RINA_实验总览.md           ← 整理版实验概览
-  DLM_survey.md             ← Diffusion LM 文献调研
 
 archive/                   ← 前代归档（CANN, MoHE）
 ```
