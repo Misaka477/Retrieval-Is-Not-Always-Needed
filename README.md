@@ -1,37 +1,40 @@
 # RINA — Retrieval Is Not Always Needed
 
-Efficient language modeling with MLA + K→V prediction + GQA + RoPE + SwiGLU + 1.58-bit ternary weights + int4 K/Q + int2 V residual.
+Efficient language modeling with MLA + K→V + GQA + RoPE + SwiGLU + int4 K/Q + int2 V, plus experimental research on tiered memory architectures.
 
-## Architecture
+## Research Architecture (Gen 5)
 
 ```
-token → Embedding → [12× Block] → LN → Head → logits
-Block = LayerNorm → MLA (K→V prediction, GQA, RoPE) → LayerNorm → SwiGLU
+                ┌───────────────────────────┐
+                │  L3: Latent Indexed       │
+                │      Sparse Attention     │  ← A Route ✅ verified
+                ├───────────────────────────┤
+                │  L2: Full Attention       │
+                │      (MLA + K→V + GQA)    │  ← Baseline
+                ├───────────────────────────┤
+                │  L1: Inertia Wave         │
+                │      (SSM recurrence)     │  ← C Route ✅ verified
+                └───────────────────────────┘
+
+AC Hybrid (Jamba-style): L1 + L2 + L3 in a single model ✅ verified
 ```
 
-All linear layers support 1.58-bit ternary quantization (STE). Q/K/V in attention support int4/int2 quantization-aware training.
+### Routes
 
-## Status
-
-| Component | Verified |
-|---|---|
-| MLA latent compression (d_c=128) | 32M ✅ |
-| K→V prediction (no separate V projection) | +0.08 CE vs baseline ✅ |
-| GQA (8Q→4KV) | — |
-| RoPE | — |
-| SwiGLU | — |
-| 1.58-bit ternary weights (STE) | replaces all 41 Linear layers ✅ |
-| int4 K/Q + int2 V residual | 0 additional CE loss ✅ |
-
-### Baseline vs RINA (90M tokens, GPT-2 vocab, 12L·512D)
-
-| | Standard Transformer | RINA |
+| Route | Description | Status |
 |---|---|---|
-| Core params | ~38M | **~32M** |
-| Total params (w/ emb) | ~63.5M | **~58M** |
-| KV cache / token | 1024 | **~192** |
-| Weight storage | fp16 | **1.58-bit** |
-| Validation CE | 4.17 | **4.25** |
+| **A** | Latent Indexed Attention — contrastive learning on MLA latent (c_kv) for sparse indexing | ✅ v3 triplet margin, gap=0.924 |
+| **C** | Inertia Wave — replace attention with decay recurrence, O(T), no KV cache | ✅ trained, quality below attention |
+| **AC** | Hybrid combining C (shallow) + Full Attn (mid) + Sparse A (deep) | ✅ verified, inertia not dead |
+| **Sparse Inf** | Use A's latent space as index for top-K attention inference | ✅ K=8 ≈ full attn quality, ~40× saving |
+
+### Key Findings
+
+- 1.58-bit ternary quantization collapses at 32M (information channel too narrow)
+- int4 K/Q + int2 V works well at 32M
+- Latent Indexed Attention: triplet margin > InfoNCE for latent space contrastive learning
+- Inertia Wave: 128-dim state insufficient for language modeling alone, but works as auxiliary layers
+- AC Hybrid: not better than pure attention at 32M; advantage domain is 7B+ / 100K+ context
 
 ## Quick Start
 
@@ -39,32 +42,55 @@ All linear layers support 1.58-bit ternary quantization (STE). Q/K/V in attentio
 pip install torch numpy tqdm transformers
 ```
 
-```python
-from rina import RINA, RINAConfig
+### Training
 
-cfg = RINAConfig(vocab_size=50257, n_layer=12, n_head=8, n_kv_heads=4, n_embd=512, d_c=128)
-model = RINA(cfg)
-logits, loss = model(input_ids, targets)
+```bash
+# Baseline (MLA + int4)
+python3 -m rina.train --int4 --out nanoGPT/out-quant --steps 10000 --bsz 4
 
-# Enable quantization
-cfg.use_158 = True
-cfg.use_int4 = True
-model = RINA(cfg)
+# Route A (Latent Indexed Attention with triplet contrastive)
+python3 -m rina.train_a --int4 --out nanoGPT/out-rina-a-v3 --steps 10000 --bsz 4
+
+# Route C (Inertia Wave)
+python3 -m rina.train_c --out nanoGPT/out-rina-c --steps 10000 --bsz 4
+
+# AC Hybrid
+python3 -m rina.train_ac --int4 --out nanoGPT/out-rina-ac --steps 10000 --bsz 4
+```
+
+### Generation
+
+```bash
+python3 -m rina.gen --load nanoGPT/out-final/ckpt.pt --int4 --prompt "The capital of France is"
+```
+
+### Full Evaluation
+
+```bash
+bash eval_all.sh
 ```
 
 ## Project Structure
 
 ```
 rina/
-  __init__.py    ← exports RINA, RINAConfig
-  model.py       ← model definition
-  gen.py         ← generation
-  train.py       ← training
+  model.py       ← Gen 5 baseline (MLA + K→V + quantization)
+  model_a.py     ← Route A: Latent Indexed Attention
+  model_c.py     ← Route C: Inertia Wave
+  model_ac.py    ← AC Hybrid
+  train.py       ← baseline training
+  train_a.py     ← Route A training (CE + triplet contrastive)
+  train_c.py     ← Route C training
+  train_ac.py    ← AC Hybrid training
+  gen.py         ← generation (works with all routes)
+
+eval_all.sh      ← reproduce generation comparison & ablations
 
 docs/
-  RINA实验日志.md ← experiment log
+  RINA实验日志.md ← full experiment log (8800+ lines)
 
 checkpoints/     ← data & weights (gitignored)
+nanoGPT/         ← trained model exports (gitignored)
 ```
 
 ## Hardware
@@ -79,38 +105,24 @@ rapidsound@163.com / mikotomisaka477@gmail.com
 
 # RINA — Retrieval Is Not Always Needed
 
-MLA + K→V 预测 + GQA + RoPE + SwiGLU + 1.58-bit 三元权重 + int4 K/Q + int2 V 残差的全栈语言模型。
+高效语言模型架构 + 层次记忆结构的实验研究。
 
-## 架构
+## 研究架构（Gen 5）
 
-```
-token → Embedding → [12× Block] → LN → Head → logits
-Block = LayerNorm → MLA (K→V 预测, GQA, RoPE) → LayerNorm → SwiGLU
-```
-
-所有权重线性层支持 1.58-bit 三元量化（STE 训练）。Q/K/V 支持 int4/int2 量化感知训练。
-
-## 状态
-
-| 组件 | 状态 |
-|---|---|
-| MLA 潜压缩（d_c=128） | ✅ 32M 验证 |
-| K→V 预测（无独立 V 投影） | ✅ CE +0.08 |
-| GQA（8Q→4KV） | ✅ |
-| RoPE | ✅ |
-| SwiGLU | ✅ |
-| 1.58-bit 三元权重（STE） | ✅ 全部 41 个 Linear 替换 |
-| int4 K/Q + int2 V 残差 | ✅ 0 CE 额外损失 |
-
-### 基线对比（90M tokens, GPT-2 词表, 12L·512D）
-
-| | 标准 Transformer | RINA |
+| 路线 | 描述 | 状态 |
 |---|---|---|
-| 核心参数 | ~38M | **~32M** |
-| 总参数 | ~63.5M | **~58M** |
-| KV cache / token | 1024 | **~192** |
-| 权重存储 | fp16 | **1.58-bit** |
-| 验证 CE | 4.17 | **4.25** |
+| **A** | Latent Indexed Attention — 在 MLA latent 空间做对比学习，用于稀疏索引 | ✅ v3 triplet margin 验证通过，gap=0.924 |
+| **C** | Inertia Wave — 衰减波递推替代注意力，O(T) 无 KV cache | ✅ 训练通过，质量不及 attention |
+| **AC** | Jamba 风格混合（浅层惯性波 + 中层全量注意力 + 深层稀疏索引） | ✅ 验证通过，惯性波非死层 |
+| **稀疏推理** | 用 A 的 latent 空间做索引，top-K 稀疏 attention | ✅ K=8 ≈ 全量 attention，~40× 节省 |
+
+### 关键发现
+
+- **1.58-bit 三元量化**在 32M 上不可行（信息通道太窄，权重全部 round 到 0）
+- **int4 K/Q + int2 V** 在 32M 上工作正常
+- **对比学习策略**：triplet margin > InfoNCE（v3 gap=0.924 vs v1 0.039）
+- **惯性波**：128-dim 状态容量不够单独做语言模型，但作辅助层有效
+- **AC 混合**：32M 上不优于纯 attention，优势域在 7B+ / 100K+ 长上下文
 
 ## 快速开始
 
@@ -118,24 +130,55 @@ Block = LayerNorm → MLA (K→V 预测, GQA, RoPE) → LayerNorm → SwiGLU
 pip install torch numpy tqdm transformers
 ```
 
-```python
-from rina import RINA, RINAConfig
-cfg = RINAConfig(vocab_size=50257, n_layer=12, n_head=8, n_kv_heads=4, n_embd=512, d_c=128)
-model = RINA(cfg)
-logits, loss = model(input_ids, targets)
+### 训练
 
-# 开启量化
-cfg.use_158 = True
-cfg.use_int4 = True
-model = RINA(cfg)
+```bash
+# 基线（MLA + int4）
+python3 -m rina.train --int4 --out nanoGPT/out-quant --steps 10000 --bsz 4
+
+# Route A（Latent Indexed Attention + triplet 对比学习）
+python3 -m rina.train_a --int4 --out nanoGPT/out-rina-a-v3 --steps 10000 --bsz 4
+
+# Route C（惯性波）
+python3 -m rina.train_c --out nanoGPT/out-rina-c --steps 10000 --bsz 4
+
+# AC 混合架构
+python3 -m rina.train_ac --int4 --out nanoGPT/out-rina-ac --steps 10000 --bsz 4
+```
+
+### 生成
+
+```bash
+python3 -m rina.gen --load nanoGPT/out-final/ckpt.pt --int4 --prompt "The capital of France is"
+```
+
+### 完整消融对比
+
+```bash
+bash eval_all.sh
 ```
 
 ## 包结构
 
 ```
-rina/        ← 模型代码（MLA + K→V + 量化）
-docs/        ← 实验日志
-checkpoints/ ← 数据与权重（gitignored）
+rina/
+  model.py       ← Gen 5 基线（MLA + K→V + 量化）
+  model_a.py     ← Route A: Latent Indexed Attention
+  model_c.py     ← Route C: Inertia Wave
+  model_ac.py    ← AC 混合架构
+  train.py       ← 基线训练
+  train_a.py     ← Route A 训练（CE + triplet 对比）
+  train_c.py     ← Route C 训练
+  train_ac.py    ← AC 混合训练
+  gen.py         ← 生成（兼容所有路线）
+
+eval_all.sh      ← 复现生成对比 & 消融实验
+
+docs/
+  RINA实验日志.md ← 完整实验记录（8800+ 行）
+
+checkpoints/     ← 数据与权重（gitignored）
+nanoGPT/         ← 训练好的模型导出（gitignored）
 ```
 
 ## 硬件

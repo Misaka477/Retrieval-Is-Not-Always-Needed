@@ -51,11 +51,18 @@ class BitLinear(nn.Module):
         self.weight = nn.Parameter(torch.empty(out_f, in_f))
         self.bias = nn.Parameter(torch.zeros(out_f)) if bias else None
         nn.init.normal_(self.weight, 0.0, 0.02)
-        self.scale = nn.Parameter(torch.ones(out_f))
+        g = max(1, out_f // 128)
+        while out_f % g != 0 and g > 1:
+            g -= 1
+        self.groups = g
+        self.scale = nn.Parameter(torch.ones(self.groups))
     def forward(self, x):
-        w = self.weight; s = self.scale.view(-1, 1)
-        w_q = torch.clamp(torch.round(w / s), -1, 1)
-        w_e = w + (w_q * s - w).detach()
+        w = self.weight; g = self.groups
+        w_g = w.view(g, -1)
+        s = w_g.abs().mean(dim=-1, keepdim=True) * self.scale.view(g, 1)
+        w_q = torch.clamp(torch.round(w_g / (s + 1e-8)), -1, 1) * s
+        w_q = w_q.view_as(w)
+        w_e = w + (w_q - w).detach()
         return F.linear(x, w_e, self.bias)
 
 # ── RoPE ──
@@ -89,8 +96,8 @@ class MLALayer(nn.Module):
         self.w_uq=lin(c, self.d_c, self.n_head*self.d_h)
         self.w_uk=lin(c, self.d_c, self.n_kv*self.d_h)
         self.w_k2v=lin(c, self.n_kv*self.d_h, self.n_kv*self.d_h)
-        self.w_qr=nn.Linear(self.d, self.n_head*self.d_hr,bias=c.bias)
-        self.w_kr=nn.Linear(self.d, self.n_kv*self.d_hr,bias=c.bias)
+        self.w_qr=lin(c, self.d, self.n_head*self.d_hr)
+        self.w_kr=lin(c, self.d, self.n_kv*self.d_hr)
         self.rope=RoPE(self.d_hr, c.block_size)
         self.rope_q=RoPE(self.d_hr, c.block_size)
         self.c_proj=lin(c, self.n_head*self.d_h, self.d)
@@ -162,7 +169,7 @@ class RINA(nn.Module):
         x = self.transformer.ln_f(x)
         if targets is not None:
             l = self.lm_head(x)
-            loss = F.cross_entropy(l.view(-1, l.size(-1)), targets.view(-1), ignore_index=-1)
+            loss = F.cross_entropy(l.view(-1, l.size(-1)), targets.reshape(-1), ignore_index=-1)
             return l, loss
         return self.lm_head(x[:, [-1], :]), None
 

@@ -1,12 +1,13 @@
 # RINA 实验总览
 
-> 从原始实验日志 (`RINA实验日志.md`, 4274 行) 整理而成。
-> 按实验阶段组织，突出因果链条和关键结论。原始日志中每个决策都有完整上下文。
+> 从原始实验日志 (`RINA实验日志.md`, 8800+ 行) 整理而成。
+> 按实验阶段组织，突出因果链条和关键结论。
+>
+> **当前版本：** Gen 5 — Transformer + MLA（2026-06-15）
 
 **项目：** RINA (Retrieval Is Not Always Needed)
-**架构：** CANN + SSM + temporal SNN gating + Hebbian plasticity
-**参数：** 15.3M
-**核心结果：** WikiText-103 ppL **34.7**（持平 GPT-2 15M 的 34.8）
+**架构：** MLA + K→V + GQA + RoPE + SwiGLU + int4 K/Q + int2 V + Latent Indexed Attention / Inertia Wave
+**实验卡：** RTX 3070 Ti Laptop (8 GB)
 
 ---
 
@@ -643,7 +644,7 @@ label = 1 if logprob_after(gt_token, h') > logprob_before(gt_token, h)
 
 ### 12.3 配套清理
 
-- 归档全部 CANN/MoHE 时代代码（experiments/、scripts/、旧 models/）
+- 归档全部 CANN/MoHE 时代代码（experiments/、scripts/、旧 nanoGPT/）
 - 删除死代码（rwkv_tokenizer.py、sample.py、旧 CSV）
 - 归档旧 kernel（rwkv7_clampw.*）
 
@@ -652,4 +653,75 @@ label = 1 if logprob_after(gt_token, h') > logprob_before(gt_token, h)
 1. Stateful 跨步记忆 → 解决 Capital of France CoT 绕死（累积修正方向不漂移）
 2. GT token logprob label → 同时修掉 Romeo（错误拦截）和 Capital of France（错误放行）
 3. 如有效 → MoE Diffusion 延伸（多 expert stateful denoiser + EC router）
+
+---
+
+## 13. Gen 5 — Transformer MLA + 层次记忆架构（2026-06-15）
+
+Gen 4 放弃后，回归 Transformer 范式，但用 MLA（Multi-head Latent Attention, d_c=128）替代标准 attention。核心问题从"能否替代 attention"升级为：**能否在单个 Transformer 内构建层次记忆架构？**
+
+### 13.1 基线：MLA + K→V + GQA + RoPE + SwiGLU + int4
+
+- 架构：12L·8H·4KV·512D·d_c=128
+- 量化：int4 K/Q + int2 V（STE 训练），稳定无损
+- 数据：FineWeb-Edu 纯英文 ~100M tokens，GPT-2 50K 词表
+- 结果：out-quant 生成正常 ✅，1.58-bit 坍缩 ❌（32M 信息通道太窄）
+
+### 13.2 Route A: Latent Indexed Attention
+
+在 MLA 的 128-dim latent（c_kv）上做对比学习，训练语义结构化的 latent 空间用作稀疏注意力索引。
+
+| 版本 | loss 策略 | 同主题 cos | 跨主题 cos | 区分度 gap |
+|---|---|---|---|---|
+| v1 | InfoNCE w=31 | 0.985 | 0.946 | 0.039 ❌ |
+| v2 | InfoNCE ×5 | 0.995 | 0.994 | 0.001 ❌ |
+| **v3** | **triplet margin** | **0.905** | **-0.019** | **0.924 ✅** |
+
+**稀疏推理验证：** K=8 + local_w=4 替代全量 attention，生成质量几乎无损，~40× FLOP 节省（T=512）。
+
+### 13.3 Route C: Inertia Wave
+
+用衰减波递推完全替代 attention：`h_t = sigmoid(W_decay) ⊙ h_{t-1} + W_mem(c_kv)`。用 `cumprod + cumsum` 实现 parallel scan（7.4 it/s，比串行 loop 快 15×）。
+
+结果：有词汇分布但语法连贯性不足——128-dim 状态容量不够单独做语言模型。
+
+### 13.4 AC 混合架构（Jamba 风格）
+
+| 层 | 类型 |
+|---|---|
+| 0-3 | Inertia Wave（L1 快速响应） |
+| 4-7 | Full Attention（L2 精确检索） |
+| 8-11 | Sparse Latent Index（L3 高效索引） |
+
+参数量 57.47M（持平基线）。消融验证惯性波非死层，但混合架构在 32M 上不优于纯 attention。
+
+### 13.5 Gen 5 关键结论
+
+| 方向 | 结论 |
+|---|---|
+| 1.58-bit 三元量化 | 32M 不可行（信息损失太大） |
+| int4 K/Q + int2 V | 32M 稳定无损 ✅ |
+| Latent Indexed Attention | ▲ 全链路验证通过 ✅ |
+| Inertia Wave | ◎ 可训通但不够用 ⚠️ |
+| AC 混合 | ◎ Jamba 优势域在 7B+ / 100K+ context ⚠️ |
+| Latent ROM 愿景 | 模型容量与知识存储解耦 → 后续方向 |
+
+### 13.6 复现
+
+```bash
+pip install torch numpy tqdm transformers
+
+# 完整评估
+bash eval_all.sh
+
+# 训练
+python3 -m rina.train --int4 --out nanoGPT/out-quant --steps 10000 --bsz 4
+python3 -m rina.train_a --int4 --out nanoGPT/out-rina-a-v3 --steps 10000 --bsz 4
+python3 -m rina.train_c --out nanoGPT/out-rina-c --steps 10000 --bsz 4
+python3 -m rina.train_ac --int4 --out nanoGPT/out-rina-ac --steps 10000 --bsz 4
+```
+
+---
+
+*整理自 `RINA实验日志.md`（8800+ 行, 2026-05-15~06-16）*
 

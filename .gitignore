@@ -1,44 +1,40 @@
+# Python
 __pycache__/
-_rwkv_official/
-.kilo/
 *.pyc
 *.pyo
+
+# Training outputs & data (too large)
+checkpoints/
+nanoGPT/
+data/
+logs/
+hf_cache/
+paper/
+
+# Experiment binaries
+*.pt
+*.pth
+*.npy
 *.dll
 *.exp
 *.lib
 *.pdb
 *.log
-*.pt
-archive/checkpoints/
-.vscode/
 
-archive/references/
-archive/niah_scripts/
+# Editors
+.vscode/
+.kilo/
+
+# References (third-party)
+archive/
+tokenizers/
+_rwkv_official/
+
+# Internal docs (not for public)
 docs/RINA实验日志.md
 docs/KVR_实验全记录.md
 docs/ARCH.md
 docs/DLM_survey.md
-*.pth
-checkpoints/*.pt
-checkpoints/*.npy
-tokenizers/*
-paper/
-RINA_CHECKLIST.md
+
+# Handover notes (project-internal)
 HANDOVER.md
-hf_cache/
-logs/
-data/
-experiments/checkpoints/
-HANDOVER_v2.md# Ignore NanoGPT (official repo, not our code)
-nanoGPT/
-archive/rwkv7_clampw.*
-archive/kernels/
-checkpoints/*.pt
-checkpoints/*.csv
-data/english_*.npy
-data/english_gpt2.npy
-*.pyc
-__pycache__/
-# Ignore checkpoints and data
-checkpoints/rina_*.pt
-rina/__pycache__/

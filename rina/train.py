@@ -60,8 +60,8 @@ def train(config: RINAConfig, **kwargs):
     t0 = time.time()
 
     for step in pbar:
-        x = get_batch(config.block_size)
-        logits, loss = model(x, x)
+        x = get_batch(config.block_size + 1)
+        logits, loss = model(x[:, :-1], x[:, 1:])
         opt.zero_grad(); loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step(); sched.step()
@@ -69,9 +69,9 @@ def train(config: RINAConfig, **kwargs):
         if step % 1000 == 0:
             model.eval()
             with torch.no_grad():
-                xv = get_val(config.block_size)
-                lv, _ = model(xv, xv)
-                ce_v = lv.mean().item()
+                xv = get_val(config.block_size + 1)
+                _, val_loss = model(xv[:, :-1], xv[:, 1:])
+                ce_v = val_loss.item()
             model.train()
             pbar.set_postfix(loss=f'{loss.item():.2f}', val=f'{ce_v:.2f}',
                              lr=f'{sched.get_last_lr()[0]:.1e}')
@@ -94,6 +94,7 @@ if __name__ == '__main__':
     p.add_argument('--lr', type=float, default=3e-4)
     p.add_argument('--bsz', type=int, default=8)
     p.add_argument('--steps', type=int, default=10000)
+    p.add_argument('--out', type=str, default='checkpoints/rina')
     p.add_argument('--158', action='store_true', help='启用 1.58-bit 三元量化')
     p.add_argument('--int4', action='store_true', help='启用 int4/int2 量化感知训练')
     args = p.parse_args()
@@ -103,4 +104,4 @@ if __name__ == '__main__':
         n_head=args.heads, n_kv_heads=args.kv_heads, d_c=args.d_c,
         block_size=args.seq, use_158=args.__dict__['158'], use_int4=args.int4,
     )
-    train(cfg, lr=args.lr, bsz=args.bsz, steps=args.steps, out='checkpoints/rina')
+    train(cfg, lr=args.lr, bsz=args.bsz, steps=args.steps, out=args.out)

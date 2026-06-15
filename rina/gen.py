@@ -1,13 +1,15 @@
 """RINA 生成测试。用法：
   python3 -m rina.gen                    # 随机初始化（看 loss）
   python3 -m rina.gen --load path.pt     # 加载权重看生成
+  python3 -m rina.gen --prompt "Hello" --temp 0.9
 """
 import torch, torch.nn.functional as F, argparse, os
 from .model import RINA, RINAConfig
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-def generate(cfg, ckpt_path=None, prompts=None, steps=40, temp=0.8):
+def generate(cfg, ckpt_path=None, prompts=None, steps=25, temp=0.9, rep_penalty=1.05):
+    """生成文本。rep_penalty>1 时会惩罚已出现过的 token。"""
     model = RINA(cfg).to(device); model.eval()
     if ckpt_path and os.path.exists(ckpt_path):
         sd = torch.load(ckpt_path, map_location=device, weights_only=False)
@@ -26,21 +28,37 @@ def generate(cfg, ckpt_path=None, prompts=None, steps=40, temp=0.8):
     for pr in prompts:
         ids = tok.encode(pr)[:16]
         x = torch.tensor([ids], device=device)
+        generated_ids = set()
         for _ in range(steps):
             l, _ = model(x)
             p = F.softmax(l[:, -1].float() / temp, -1)
             p[0, 0] = 0
-            x = torch.cat([x, torch.multinomial(p, 1)], 1)
-        print(f'P: {pr}')
+            # repetition penalty
+            if rep_penalty > 1.0 and generated_ids:
+                for gid in generated_ids:
+                    if gid < p.size(-1):
+                        p[0, gid] /= rep_penalty
+                p = p / p.sum()
+            nxt = torch.multinomial(p, 1)
+            generated_ids.add(nxt.item())
+            x = torch.cat([x, nxt], 1)
+        print(f'\nP: {pr}')
         print(f'G: {tok.decode(x[0].tolist())}\n')
 
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser()
-    p.add_argument('--load', type=str, default=None)
+    p.add_argument('--load', type=str, default=None, help='checkpoint 路径')
+    p.add_argument('--prompt', type=str, default=None, help='自定义 prompt')
+    p.add_argument('--steps', type=int, default=25)
+    p.add_argument('--temp', type=float, default=0.9)
+    p.add_argument('--rep', type=float, default=1.05, help='重复惩罚系数')
+    p.add_argument('--vocab', type=int, default=50257, help='词表大小')
     p.add_argument('--seq', type=int, default=512)
     p.add_argument('--158', action='store_true')
     p.add_argument('--int4', action='store_true')
     args = p.parse_args()
-    cfg = RINAConfig(block_size=args.seq, use_158=args.__dict__['158'], use_int4=args.int4)
-    generate(cfg, ckpt_path=args.load)
+    cfg = RINAConfig(vocab_size=args.vocab, block_size=args.seq, use_158=args.__dict__['158'], use_int4=args.int4)
+    prompts = [args.prompt] if args.prompt else None
+    generate(cfg, ckpt_path=args.load, prompts=prompts, steps=args.steps,
+             temp=args.temp, rep_penalty=args.rep)
