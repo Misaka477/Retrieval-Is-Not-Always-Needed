@@ -29,4 +29,16 @@ hf_cache/
 logs/
 data/
 experiments/checkpoints/
-HANDOVER_v2.md
+HANDOVER_v2.md# Ignore NanoGPT (official repo, not our code)
+nanoGPT/
+archive/rwkv7_clampw.*
+archive/kernels/
+checkpoints/*.pt
+checkpoints/*.csv
+data/english_*.npy
+data/english_gpt2.npy
+*.pyc
+__pycache__/
+# Ignore checkpoints and data
+checkpoints/rina_*.pt
+rina/__pycache__/
