@@ -46,22 +46,22 @@ pip install torch numpy tqdm transformers
 
 ```bash
 # Baseline (MLA + int4)
-python3 -m rina.train --int4 --out nanoGPT/out-quant --steps 10000 --bsz 4
+python3 -m rina.train --int4 --out models/out-quant --steps 10000 --bsz 4
 
 # Route A (Latent Indexed Attention with triplet contrastive)
-python3 -m rina.train_a --int4 --out nanoGPT/out-rina-a-v3 --steps 10000 --bsz 4
+python3 -m rina.train_a --int4 --out models/out-rina-a-v3 --steps 10000 --bsz 4
 
 # Route C (Inertia Wave)
-python3 -m rina.train_c --out nanoGPT/out-rina-c --steps 10000 --bsz 4
+python3 -m rina.train_c --out models/out-rina-c --steps 10000 --bsz 4
 
 # AC Hybrid
-python3 -m rina.train_ac --int4 --out nanoGPT/out-rina-ac --steps 10000 --bsz 4
+python3 -m rina.train_ac --int4 --out models/out-rina-ac --steps 10000 --bsz 4
 ```
 
 ### Generation
 
 ```bash
-python3 -m rina.gen --load nanoGPT/out-final/ckpt.pt --int4 --prompt "The capital of France is"
+python3 -m rina.gen --load models/out-final/rina-gen5-baseline-fp32.pt --int4 --prompt "The capital of France is"
 ```
 
 ### Full Evaluation
@@ -90,7 +90,7 @@ docs/
   RINA实验日志.md ← full experiment log (8800+ lines)
 
 checkpoints/     ← data & weights (gitignored)
-nanoGPT/         ← trained model exports (gitignored)
+models/          ← trained model exports (gitignored)
 ```
 
 ## Hardware
@@ -134,22 +134,22 @@ pip install torch numpy tqdm transformers
 
 ```bash
 # 基线（MLA + int4）
-python3 -m rina.train --int4 --out nanoGPT/out-quant --steps 10000 --bsz 4
+python3 -m rina.train --int4 --out models/out-quant --steps 10000 --bsz 4
 
 # Route A（Latent Indexed Attention + triplet 对比学习）
-python3 -m rina.train_a --int4 --out nanoGPT/out-rina-a-v3 --steps 10000 --bsz 4
+python3 -m rina.train_a --int4 --out models/out-rina-a-v3 --steps 10000 --bsz 4
 
 # Route C（惯性波）
-python3 -m rina.train_c --out nanoGPT/out-rina-c --steps 10000 --bsz 4
+python3 -m rina.train_c --out models/out-rina-c --steps 10000 --bsz 4
 
 # AC 混合架构
-python3 -m rina.train_ac --int4 --out nanoGPT/out-rina-ac --steps 10000 --bsz 4
+python3 -m rina.train_ac --int4 --out models/out-rina-ac --steps 10000 --bsz 4
 ```
 
 ### 生成
 
 ```bash
-python3 -m rina.gen --load nanoGPT/out-final/ckpt.pt --int4 --prompt "The capital of France is"
+python3 -m rina.gen --load models/out-final/rina-gen5-baseline-fp32.pt --int4 --prompt "The capital of France is"
 ```
 
 ### 完整消融对比
@@ -178,7 +178,7 @@ docs/
   RINA实验日志.md ← 完整实验记录（8800+ 行）
 
 checkpoints/     ← 数据与权重（gitignored）
-nanoGPT/         ← 训练好的模型导出（gitignored）
+models/         ← 训练好的模型导出（gitignored）
 ```
 
 ## 硬件

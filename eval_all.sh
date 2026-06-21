@@ -20,11 +20,11 @@ from transformers import GPT2Tokenizer
 import torch.nn.functional as F
 
 device='cuda'
-tok=GPT2Tokenizer.from_pretrained('checkpoints/gpt2_tokenizer'); tok.pad_token=tok.eos_token
+tok=GPT2Tokenizer.from_pretrained('gpt2'); tok.pad_token=tok.eos_token
 
 cfg = RINA_A_Config(vocab_size=50257, block_size=512)
 m = RINA_A(cfg).to(device); m.eval()
-sd = torch.load('nanoGPT/out-final/ckpt.pt', map_location=device, weights_only=False)['model']
+sd = torch.load('models/out-final/rina-gen5-baseline-fp32.pt', map_location=device, weights_only=False)['model']
 m.load_state_dict(sd, strict=False)
 
 for prompt in ['The capital of France is', 'Alice and Bob', 'In the beginning']:
@@ -47,11 +47,11 @@ from transformers import GPT2Tokenizer
 import torch.nn.functional as F
 
 device='cuda'
-tok=GPT2Tokenizer.from_pretrained('checkpoints/gpt2_tokenizer'); tok.pad_token=tok.eos_token
+tok=GPT2Tokenizer.from_pretrained('gpt2'); tok.pad_token=tok.eos_token
 
 cfg = RINA_A_Config(vocab_size=50257, block_size=512, use_int4=True)
 m = RINA_A(cfg).to(device); m.eval()
-sd = torch.load('nanoGPT/out-quant/ckpt.pt', map_location=device, weights_only=False)['model']
+sd = torch.load('models/out-quant/rina-gen5-baseline-int4.pt', map_location=device, weights_only=False)['model']
 m.load_state_dict(sd, strict=False)
 
 for prompt in ['The capital of France is', 'Alice and Bob', 'In the beginning']:
@@ -74,11 +74,11 @@ from transformers import GPT2Tokenizer
 import torch.nn.functional as F
 
 device='cuda'
-tok=GPT2Tokenizer.from_pretrained('checkpoints/gpt2_tokenizer'); tok.pad_token=tok.eos_token
+tok=GPT2Tokenizer.from_pretrained('gpt2'); tok.pad_token=tok.eos_token
 
 cfg = RINA_A_Config(vocab_size=50257, block_size=512, use_int4=True)
 m = RINA_A(cfg).to(device); m.eval()
-sd = torch.load('nanoGPT/out-rina-a-v3/rina_a_final.pt', map_location=device, weights_only=False)['model']
+sd = torch.load('models/out-rina-a-v3/rina-gen5-route-a-v3.pt', map_location=device, weights_only=False)['model']
 m.load_state_dict(sd, strict=False)
 
 for prompt in ['The capital of France is', 'Alice and Bob', 'In the beginning']:
@@ -101,11 +101,11 @@ from transformers import GPT2Tokenizer
 import torch.nn.functional as F
 
 device='cuda'
-tok=GPT2Tokenizer.from_pretrained('checkpoints/gpt2_tokenizer'); tok.pad_token=tok.eos_token
+tok=GPT2Tokenizer.from_pretrained('gpt2'); tok.pad_token=tok.eos_token
 
 cfg = RINA_C_Config(vocab_size=50257, block_size=512)
 m = RINA_C(cfg).to(device); m.eval()
-sd = torch.load('nanoGPT/out-rina-c/rina_c_final.pt', map_location=device, weights_only=False)['model']
+sd = torch.load('models/out-rina-c/rina-gen5-route-c.pt', map_location=device, weights_only=False)['model']
 m.load_state_dict(sd, strict=False)
 
 for prompt in ['The capital of France is', 'Alice and Bob', 'In the beginning']:
@@ -128,11 +128,11 @@ from transformers import GPT2Tokenizer
 import torch.nn.functional as F
 
 device='cuda'
-tok=GPT2Tokenizer.from_pretrained('checkpoints/gpt2_tokenizer'); tok.pad_token=tok.eos_token
+tok=GPT2Tokenizer.from_pretrained('gpt2'); tok.pad_token=tok.eos_token
 
 cfg = RINA_AC_Config(vocab_size=50257, block_size=512, use_int4=True, sparse_k=8, sparse_local_w=4)
 m = RINA_AC(cfg).to(device); m.eval()
-sd = torch.load('nanoGPT/out-rina-ac/rina_ac_final.pt', map_location=device, weights_only=False)['model']
+sd = torch.load('models/out-rina-ac/rina-gen5-route-ac-hybrid.pt', map_location=device, weights_only=False)['model']
 m.load_state_dict(sd, strict=False)
 
 for prompt in ['The capital of France is', 'Alice and Bob', 'In the beginning']:
@@ -155,11 +155,11 @@ from transformers import GPT2Tokenizer
 import torch.nn.functional as F
 
 device='cuda'
-tok=GPT2Tokenizer.from_pretrained('checkpoints/gpt2_tokenizer'); tok.pad_token=tok.eos_token
+tok=GPT2Tokenizer.from_pretrained('gpt2'); tok.pad_token=tok.eos_token
 
 cfg = RINA_AC_Config(vocab_size=50257, block_size=512, use_int4=True, sparse_k=8, sparse_local_w=4)
 m = RINA_AC(cfg).to(device); m.eval()
-sd = torch.load('nanoGPT/out-rina-ac/rina_ac_final.pt', map_location=device, weights_only=False)['model']
+sd = torch.load('models/out-rina-ac/rina-gen5-route-ac-hybrid.pt', map_location=device, weights_only=False)['model']
 m.load_state_dict(sd, strict=False)
 for n, p in m.named_parameters():
     if any(f'h.{i}.' in n for i in [0,1,2,3]):

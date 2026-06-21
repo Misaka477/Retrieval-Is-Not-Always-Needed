@@ -132,14 +132,18 @@ class RINA_A(nn.Module):
             return l, loss, torch.stack(lats, dim=1)
         return self.lm_head(x[:, [-1], :]), None, None
 
-    def compute_contrastive_loss(self, lats, idx=None, margin=0.3):
-        """Triplet margin loss: 相邻 token 吸引, 远距 token 排斥, 防止全局坍缩"""
+    def compute_contrastive_loss(self, lats, idx=None, margin=1.1):
+        """跨文档 triplet margin: 同文档邻接 token 吸引, 跨文档 token 排斥"""
         B, L, T, D = lats.shape
         lats = lats[:, 1:].mean(dim=1)       # [B, T, D], skip 1st CE-heavy layer
         lats = F.normalize(lats, dim=-1)
 
-        pos_sim = (lats[:, :-1] * lats[:, 1:]).sum(-1).mean()      # 邻接吸引
-        shift = T // 2
-        neg_sim = (lats[:, :-shift] * lats[:, shift:]).sum(-1).mean()  # 远距排斥
+        pos_sim = (lats[:, :-1] * lats[:, 1:]).sum(-1).mean()
 
-        return F.relu(margin - (pos_sim - neg_sim))
+        shift = 1 if B > 1 else 0
+        b_shuf = (torch.arange(B, device=lats.device) + shift) % B
+        neg_sim = (lats * lats[b_shuf]).sum(-1).mean()
+
+        gap = pos_sim - neg_sim
+        loss = F.relu(0.95 - pos_sim) + F.relu(neg_sim + 0.15) + F.relu(margin - gap)
+        return loss

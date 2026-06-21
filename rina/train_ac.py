@@ -51,7 +51,7 @@ if __name__ == '__main__':
     p.add_argument('--steps', type=int, default=10000); p.add_argument('--lr', type=float, default=3e-4)
     p.add_argument('--bsz', type=int, default=4); p.add_argument('--seq', type=int, default=512)
     p.add_argument('--data', type=str, default='data/english_pretrain.npy')
-    p.add_argument('--out', type=str, default='nanoGPT/out-rina-ac')
+    p.add_argument('--out', type=str, default='models/out-rina-ac')
     p.add_argument('--dim', type=int, default=512); p.add_argument('--layers', type=int, default=12)
     p.add_argument('--heads', type=int, default=8); p.add_argument('--kv-heads', type=int, default=4)
     p.add_argument('--d-c', type=int, default=128); p.add_argument('--int4', action='store_true')

@@ -6,6 +6,7 @@ __pycache__/
 # Training outputs & data (too large)
 checkpoints/
 nanoGPT/
+models/
 data/
 logs/
 hf_cache/
