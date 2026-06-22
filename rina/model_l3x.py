@@ -18,7 +18,7 @@ class RINA_L3X_Config:
     n_head:int=8;n_kv_heads:int=4;head_dim:int=64;d_c:int=128;d_h_r:int=32
     dropout:float=0.0;bias:bool=False;use_int4:bool=False
     sparse_k:int=8;sparse_local_w:int=4
-    sparse_window:int=32  # 滑窗大小 W，W 步重算一次索引
+    sparse_window:int=32;sparse_n_layer:int=4
 
 class RoPE(nn.Module):
     def __init__(self,dim,max_len=4096,base=10000.0):
@@ -35,45 +35,45 @@ class RoPE(nn.Module):
         return torch.stack([x0*c-x1*s,x0*s+x1*c],dim=-1).flatten(-2)
 
 class SparseIndexManager:
-    """滑窗索引管理器：跨步复用 + 层间共享"""
     def __init__(self, window=32, k=8, local_w=4):
         self.window=window;self.k=k;self.local_w=local_w
         self.reset()
     def reset(self):
-        self.step=0
-        self.mask=None  # [T,T] bool, True=allow attend
+        self.step=0;self.last_T=0
+        self.mask=None
     def should_recompute(self):
         return self.mask is None or self.step%self.window==0
     def recompute(self, cq, T, device):
-        """全量计算 top-K 索引（取第一个 batch item）"""
-        sim=torch.bmm(F.normalize(cq[:1],-1),F.normalize(cq[:1],-1).transpose(1,2))
-        _,idx=torch.topk(sim.squeeze(0),min(self.k,T),dim=-1)
-        allow=torch.zeros(T,T,device=device,dtype=torch.bool)
+        cq_n=F.normalize(cq[:1],-1)
+        sim=torch.mm(cq_n.squeeze(0),cq_n.squeeze(0).t())
+        _,idx=torch.topk(sim,min(self.k,T-1),dim=-1)
+        mask=torch.zeros(T,T,device=device,dtype=torch.bool)
         for i in range(T):
-            start=max(0,i-self.local_w);allow[i,start:i+1]=True
-            allow[i,idx[i]]=True
-        self.mask=allow
-    def extend(self, T, device):
-        """扩展 mask 到新长度（新 token 行+列追加）"""
-        old_T=self.mask.size(0)
-        if T<=old_T: return
+            ls=max(0,i-self.local_w);mask[i,ls:i+1]=True
+            if i>0:mask[i,idx[i-1]]=True
+        mask=mask&torch.tril(torch.ones(T,T,device=device,dtype=torch.bool))
+    def extend(self, T, device, cq=None):
+        old_T=self.last_T
         new=torch.zeros(T,T,device=device,dtype=torch.bool)
         new[:old_T,:old_T]=self.mask
-        # 新 token attend 自己和最近 local_w 个历史 token
         for i in range(old_T,T):
-            start=max(0,i-self.local_w);new[i,start:i+1]=True
+            ls=max(0,i-self.local_w);new[i,ls:i+1]=True
+            if cq is not None and i>0:
+                cq_i=F.normalize(cq[:,[i]],-1)
+                past=F.normalize(cq[:,:i],-1)
+                sim=torch.bmm(cq_i,past.transpose(1,2)).squeeze(0)
+                _,idx=torch.topk(sim,min(self.k,i),dim=-1)
+                new[i,idx]=True
             new[i,i]=True
-        self.mask=new
+        self.mask=new;self.last_T=T
     def step_forward(self, cq, T, device):
-        """每生成一步调用一次，计算/刷新 mask"""
         if self.should_recompute():
             self.recompute(cq,T,device)
-        elif T>self.mask.size(0):
-            self.extend(T,device)
+        elif T>self.last_T:
+            self.extend(T,device,cq)
         self.step+=1
-        return self.mask  # 返回 bool mask
     def get_mask(self, T):
-        """attention 内部调用来获取当前 mask（不触发重算）"""
+        if self.mask is None: return None
         return torch.where(self.mask,0.0,float('-inf'))
 
 class MLALayer(nn.Module):
@@ -86,7 +86,7 @@ class MLALayer(nn.Module):
         self.sparse_k=c.sparse_k;self.sparse_w=c.sparse_local_w
         self.w_dqkv=nn.Linear(self.d,self.d_c,bias=c.bias)
         self.q_norm=nn.LayerNorm(self.d_c,bias=c.bias)
-        self.k_norm=nn.LayerNorm(self.d_c,bias=c.bias)
+        self.k_norm=nn.Identity()
         self.w_uq=nn.Linear(self.d_c,self.n_head*self.d_h,bias=c.bias)
         self.w_uk=nn.Linear(self.d_c,self.n_kv*self.d_h,bias=c.bias)
         self.w_k2v=nn.Linear(self.n_kv*self.d_h,self.n_kv*self.d_h,bias=c.bias)
@@ -110,11 +110,34 @@ class MLALayer(nn.Module):
             kc=kc.repeat_interleave(self.n_rep,1);v=v.repeat_interleave(self.n_rep,1);kr=kr.repeat_interleave(self.n_rep,1)
         q=torch.cat([qc,qr],-1);k=torch.cat([kc,kr],-1)
         if self.sparse and index_mgr is not None and T>1:
-            mask=index_mgr.get_mask(T)
+            index_mgr.step_forward(cq.detach(),T,x.device)
+            m=index_mgr.get_mask(T)
+            if m is None:
+                y=F.scaled_dot_product_attention(q,k,v,dropout_p=0,is_causal=True)
+            else:
+                # 每行允许的位置数（True=允许 attend）
+                K_per_row=m.sum(-1)
+                K_max=K_per_row.max().item()
+                if K_max<1:
+                    y=F.scaled_dot_product_attention(q,k,v,dropout_p=0,is_causal=True)
+                else:
+                    # topk 提取有效索引（True 的值为 1，False 为 0）
+                    v_allow,idx=m.float().topk(K_max,dim=-1)  # [T, K]
+                    valid=v_allow>0
+                    K_use=valid.sum(-1).max().item()
+                    idx=idx[:,:K_use]  # [T, K]
+                    # gather K,V: 只取每个位置的 K 个 key
+                    idx_4d=idx.unsqueeze(0).unsqueeze(0).expand(-1,self.n_head,-1,-1)
+                    k_sel=torch.gather(k.unsqueeze(2).expand(-1,-1,T,-1,-1),3,idx_4d.unsqueeze(-1).expand(-1,-1,-1,-1,k.size(-1)))
+                    v_sel=torch.gather(v.unsqueeze(2).expand(-1,-1,T,-1,-1),3,idx_4d.unsqueeze(-1).expand(-1,-1,-1,-1,v.size(-1)))
+                    # FA 只算 K 个 key（每个 query 走独立 FA）
+                    y=F.scaled_dot_product_attention(q.reshape(-1,1,1,k.size(-1)),
+                        k_sel.reshape(-1,1,K_use,k.size(-1)),
+                        v_sel.reshape(-1,1,K_use,v.size(-1)),
+                        dropout_p=0,is_causal=False)
+                    y=y.squeeze(1).reshape(B,self.n_head,T,-1)
         else:
-            mask=torch.triu(torch.full((T,T),float('-inf'),device=x.device),diagonal=1)
-        a=(q@k.transpose(-2,-1))/math.sqrt(q.size(-1))
-        a=a+mask.unsqueeze(0).unsqueeze(0);a=F.softmax(a,-1);a=self.attn_drop(a);y=a@v
+            y=F.scaled_dot_product_attention(q,k,v,dropout_p=0,is_causal=True)
         y=y.transpose(1,2).contiguous().view(B,T,-1)
         return self.resid_drop(self.c_proj(y)), cq
 
@@ -133,15 +156,14 @@ class Block(nn.Module):
         self.ln2=nn.LayerNorm(c.n_embd,bias=c.bias)
         self.mlp=SwiGLU(c)
     def forward(self,x,index_mgr=None):
-        a,_=self.attn(self.ln1(x),index_mgr)
-        return x+a+self.mlp(self.ln2(x))
+        a,_=self.attn(self.ln1(x),index_mgr);r=x+a
+        return r+self.mlp(self.ln2(r))
 
 class RINA_L3X(nn.Module):
     """模型：全量 attention 训练，稀疏索引推理"""
     def __init__(self,c):
         super().__init__();self.config=c
-        # 前 8 层全量 attention，后 4 层稀疏 attention
-        n_sparse=4
+        n_sparse=c.sparse_n_layer
         self.transformer=nn.ModuleDict(dict(
             wte=nn.Embedding(c.vocab_size,c.n_embd),
             drop=nn.Dropout(c.dropout),
