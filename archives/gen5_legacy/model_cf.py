@@ -3,6 +3,7 @@ import math
 from dataclasses import dataclass
 import torch, torch.nn as nn
 from torch.nn import functional as F
+from rina.model_l3x import SparseIndexManager
 
 def ste_round(x): return x + (x.round()-x).detach()
 def q4(x,gs=32):
@@ -17,8 +18,8 @@ class RINA_CF_Config:
     block_size:int=1024;vocab_size:int=50304;n_layer:int=12;n_embd:int=512
     n_head:int=8;n_kv_heads:int=4;head_dim:int=64;d_c:int=128;d_h_r:int=32
     dropout:float=0.0;bias:bool=False;use_int4:bool=False
-    sparse_k:int=8;sparse_local_w:int=4
-    confidence_thresholds:tuple=(3.0,6.0,8.0)  # 原始熵阈值: L1/L3/L2/ROM
+    sparse_k:int=8;sparse_window:int=32;sparse_local_w:int=4;ssm_steps:int=1
+    confidence_thresholds:tuple=(3.0,5.0,7.0)  # 熵阈值: L1 K=1 / L1 K=3 / L3 K=16 / L2
 
 class RoPE(nn.Module):
     def __init__(self,dim,max_len=4096,base=10000.0):
@@ -38,20 +39,29 @@ class InertiaLayer(nn.Module):
     def __init__(self,c):
         super().__init__()
         self.d_c=c.d_c;self.n_head=c.n_head;self.d_h=c.head_dim
+        self.ssm_steps=getattr(c,'ssm_steps',1)
         self.w_dq=nn.Linear(c.n_embd,self.d_c,bias=c.bias)
         self.q_norm=nn.LayerNorm(self.d_c,bias=c.bias)
-        self.w_mem=nn.Linear(self.d_c,self.n_head*self.d_h,bias=c.bias)
-        self.w_decay=nn.Linear(self.d_c,self.n_head,bias=c.bias)
+        self.w_mem=nn.ModuleList([nn.Linear(self.d_c,self.n_head*self.d_h,bias=c.bias) for _ in range(self.ssm_steps)])
+        self.w_decay=nn.ModuleList([nn.Linear(self.d_c,self.n_head,bias=c.bias) for _ in range(self.ssm_steps)])
         self.w_out=nn.Linear(self.n_head*self.d_h+c.n_embd,c.n_embd,bias=c.bias)
         self.resid_drop=nn.Dropout(c.dropout)
-    def forward(self,x):
+    def forward(self,x,k=-1):  # k=-1 全步, k>=0 单步
         B,T,D=x.shape;cq=self.q_norm(self.w_dq(x))
-        mem=self.w_mem(cq).view(B,T,self.n_head,self.d_h)
-        decay=torch.sigmoid(self.w_decay(cq))
-        a=decay.unsqueeze(-1).expand(-1,-1,-1,self.d_h)
-        ca=torch.cumprod(a,dim=1)
-        states=ca*torch.cumsum(mem/(ca+1e-8),dim=1)
-        return self.resid_drop(self.w_out(torch.cat([x,states.reshape(B,T,-1)],-1)))
+        if k<0:
+            mems=[self.w_mem[i](cq).view(B,T,self.n_head,self.d_h) for i in range(self.ssm_steps)]
+            decays=[torch.sigmoid(self.w_decay[i](cq)).view(B,T,self.n_head,1) for i in range(self.ssm_steps)]
+            d_agg=decays[0];m_agg=mems[0]
+            for i in range(1,self.ssm_steps):
+                d_agg=d_agg*decays[i];m_agg=m_agg*decays[i]+mems[i]
+            a=d_agg.expand(-1,-1,-1,self.d_h)
+            ca=torch.cumprod(a,dim=1);sf=(ca*torch.cumsum(m_agg/(ca+1e-8),dim=1)).reshape(B,T,-1)
+        else:
+            mem=self.w_mem[k](cq).view(B,T,self.n_head,self.d_h)
+            decay=torch.sigmoid(self.w_decay[k](cq))
+            a=decay.unsqueeze(-1).expand(-1,-1,-1,self.d_h)
+            ca=torch.cumprod(a,dim=1);sf=(ca*torch.cumsum(mem/(ca+1e-8),dim=1)).reshape(B,T,-1)
+        return self.resid_drop(self.w_out(torch.cat([x,sf],-1)))
 
 class MLALayer(nn.Module):
     def __init__(self,c,sparse=False):
@@ -72,7 +82,7 @@ class MLALayer(nn.Module):
         self.rope_q=RoPE(self.d_hr,c.block_size)
         self.c_proj=nn.Linear(self.n_head*self.d_h,self.d,bias=c.bias)
         self.attn_drop=nn.Dropout(c.dropout);self.resid_drop=nn.Dropout(c.dropout)
-    def forward(self,x,rom_kv=None):
+    def forward(self,x,index_mgr=None,rom_kv=None):
         B,T,_=x.shape
         cq=self.q_norm(self.w_dqkv(x))
         qc=self.w_uq(cq).view(B,T,self.n_head,self.d_h).transpose(1,2)
@@ -88,11 +98,28 @@ class MLALayer(nn.Module):
             k_rom,v_rom=rom_kv
             kr_rom=torch.zeros(B,self.n_head,k_rom.size(2),self.d_hr,device=x.device)
             kc=torch.cat([k_rom,kc],dim=2);v=torch.cat([v_rom,v],dim=2);kr=torch.cat([kr_rom,kr],dim=2)
-        nk=kc.size(2)
         q=torch.cat([qc,qr],-1);k=torch.cat([kc,kr],-1)
-        a=(q@k.transpose(-2,-1))/math.sqrt(q.size(-1))
-        mask=torch.triu(torch.full((T,nk),float('-inf'),device=x.device),diagonal=1)
-        a=a+mask.unsqueeze(0).unsqueeze(0);a=F.softmax(a,-1);a=self.attn_drop(a);y=a@v
+        if self.sparse and index_mgr is not None and T>1:
+            index_mgr.sparse_k=self.sparse_k;index_mgr.local_w=self.sparse_w
+            index_mgr.step_forward(cq.detach(),T,x.device)
+            m=index_mgr.get_mask(T)
+            if m is None:
+                y=F.scaled_dot_product_attention(q,k,v,dropout_p=0,is_causal=True)
+            else:
+                K_per_row=m.sum(-1);K_max=K_per_row.max().item()
+                if K_max<1:
+                    y=F.scaled_dot_product_attention(q,k,v,dropout_p=0,is_causal=True)
+                else:
+                    v_allow,idx=m.float().topk(K_max,dim=-1);valid=v_allow>0;K_use=valid.sum(-1).max().item();idx=idx[:,:K_use]
+                    idx_4d=idx.unsqueeze(0).unsqueeze(0).expand(-1,self.n_head,-1,-1)
+                    k_sel=torch.gather(k.unsqueeze(2).expand(-1,-1,T,-1,-1),3,idx_4d.unsqueeze(-1).expand(-1,-1,-1,-1,k.size(-1)))
+                    v_sel=torch.gather(v.unsqueeze(2).expand(-1,-1,T,-1,-1),3,idx_4d.unsqueeze(-1).expand(-1,-1,-1,-1,v.size(-1)))
+                    y=F.scaled_dot_product_attention(q.reshape(-1,1,1,k.size(-1)),
+                        k_sel.reshape(-1,1,K_use,k.size(-1)),v_sel.reshape(-1,1,K_use,v.size(-1)),dropout_p=0,is_causal=False)
+                    y=y.squeeze(1).reshape(B,self.n_head,T,-1).transpose(1,2).contiguous().view(B,T,-1)
+                    return self.resid_drop(self.c_proj(y)), cq
+        else:
+            y=F.scaled_dot_product_attention(q,k,v,dropout_p=0,is_causal=True)
         y=y.transpose(1,2).contiguous().view(B,T,-1)
         return self.resid_drop(self.c_proj(y)), cq
 
@@ -115,25 +142,25 @@ class CFBlock(nn.Module):
         self.l2=MLALayer(c,sparse=False)
         self.conf_head=nn.Linear(c.d_c,1)
         self.th=c.confidence_thresholds
-    def forward(self,x,rom_kv=None,return_conf=False):
+    def forward(self,x,index_mgr=None,rom_kv=None,return_conf=False,l1_k=None):
         ln=self.ln1(x)
         cq=self.l2.q_norm(self.l2.w_dqkv(ln))
         raw=self.conf_head(cq)
-        conf=raw  # 线性输出, 直接逼近原始熵值
+        conf=raw
         
         if return_conf:
             avg=conf.mean().item()
             if avg<self.th[0]:
-                out=self.l1(ln)
+                out=self.l1(ln,k=l1_k if l1_k is not None else 0)  # 默认单步推理
             elif avg<self.th[1]:
-                out,_=self.l3(ln)
-            elif avg<self.th[2]:
-                out,_=self.l2(ln)
+                out,_=self.l3(ln,index_mgr)  # L3 K=16 sparse gather
             else:
-                out,_=self.l2(ln,rom_kv)
-            return x+out+self.mlp(self.ln2(x)),conf
-        out,_=self.l2(ln)
-        return x+out+self.mlp(self.ln2(x)),conf
+                out,_=self.l2(ln,None,rom_kv)  # L2
+            r=x+out
+            return r+self.mlp(self.ln2(r)),conf
+        out,_=self.l2(ln,None)
+        r=x+out
+        return r+self.mlp(self.ln2(r)),conf
 
 class RINA_CF(nn.Module):
     def __init__(self,c):
@@ -158,12 +185,14 @@ class RINA_CF(nn.Module):
     def _iw(self,m):
         if isinstance(m,nn.Linear):nn.init.normal_(m.weight,0.0,0.02)
         if isinstance(m,nn.Embedding):nn.init.normal_(m.weight,0.0,0.02)
-    def forward(self,idx,targets=None,rom_kv=None,return_conf=False):
+    def forward(self,idx,targets=None,rom_kv=None,return_conf=False,sparse_mgr=None,l1_k=None):
         B,T=idx.size();assert T<=self.config.block_size
         x=self.transformer.drop(self.transformer.wte(idx))
         confs=[]
+        if return_conf and sparse_mgr is None:
+            sparse_mgr=SparseIndexManager(window=self.config.sparse_window,k=self.config.sparse_k,local_w=self.config.sparse_local_w)
         for b in self.transformer.h:
-            x,c=b(x,rom_kv,return_conf);confs.append(c)
+            x,c=b(x,sparse_mgr,rom_kv,return_conf,l1_k);confs.append(c)
         x=self.transformer.ln_f(x)
         confs=torch.cat(confs,dim=-1)  # [B,T,L]
         if targets is not None:

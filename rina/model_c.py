@@ -9,37 +9,45 @@ class RINA_C_Config:
     block_size: int = 1024; vocab_size: int = 50304; n_layer: int = 12; n_embd: int = 512
     d_c: int = 128; head_dim: int = 64; n_head: int = 8
     dropout: float = 0.0; bias: bool = False; use_swiglu: bool = True
+    ssm_steps: int = 3  # 多步 SSM: 每 token 走 K 步状态更新
 
 class InertiaLayer(nn.Module):
-    """惯性波层：用衰减波递推取代注意力。
-       每个 token 从 latent 产生记忆波和衰减率，
-       通过 parallel scan 并行计算所有状态池，输出 = 状态池 + 当前 token。"""
     def __init__(self, c):
         super().__init__()
         self.d = c.n_embd; self.d_c = c.d_c; self.n_head = c.n_head; self.d_h = c.head_dim
+        self.K = c.ssm_steps
         self.w_dq = nn.Linear(self.d, self.d_c, bias=c.bias)
         self.q_norm = nn.LayerNorm(self.d_c, bias=c.bias)
-        self.w_mem = nn.Linear(self.d_c, self.n_head * self.d_h, bias=c.bias)
-        self.w_decay = nn.Linear(self.d_c, self.n_head, bias=c.bias)
+        self.w_mem = nn.ModuleList([nn.Linear(self.d_c, self.n_head * self.d_h, bias=c.bias) for _ in range(self.K)])
+        self.w_decay = nn.ModuleList([nn.Linear(self.d_c, self.n_head, bias=c.bias) for _ in range(self.K)])
         self.w_out = nn.Linear(self.n_head * self.d_h + self.d, self.d, bias=c.bias)
         self.resid_drop = nn.Dropout(c.dropout)
 
     def forward(self, x):
-        """h_t = decay_t ⊙ h_{t-1} + mem_t → parallel scan"""
         B, T, D = x.shape
-        cq = self.q_norm(self.w_dq(x))                       # [B, T, d_c]
-        mem = self.w_mem(cq).view(B, T, self.n_head, self.d_h)  # [B, T, H, d_h]
-        decay = torch.sigmoid(self.w_decay(cq))               # [B, T, H]
-
-        # parallel scan: h_t = cumprod(a) · cumsum(b / cumprod(a))
-        a = decay.unsqueeze(-1).expand(-1, -1, -1, self.d_h)  # [B, T, H, d_h]
-        ca = torch.cumprod(a, dim=1)             # cumprod of decays
-        b_scaled = mem / (ca + 1e-8)
-        states = ca * torch.cumsum(b_scaled, dim=1)  # [B, T, H, d_h]
-
-        state_f = states.reshape(B, T, -1)       # [B, T, H*d_h]
-        out = self.w_out(torch.cat([x, state_f], dim=-1))
-        return self.resid_drop(out)
+        cq = self.q_norm(self.w_dq(x))
+        if self.K > 1:
+            # 多步 SSM: K 步合并为复合 decay + 复合 mem，用 parallel scan
+            mems = [self.w_mem[k](cq).view(B,T,self.n_head,self.d_h) for k in range(self.K)]
+            decays = [torch.sigmoid(self.w_decay[k](cq)).view(B,T,self.n_head,1) for k in range(self.K)]
+            d_agg = decays[0]; m_agg = mems[0]
+            for k in range(1, self.K):
+                d_agg = d_agg * decays[k]
+                m_agg = m_agg * decays[k] + mems[k]
+            a = d_agg.expand(-1,-1,-1,self.d_h)
+            ca = torch.cumprod(a, dim=1)
+            b_scaled = m_agg / (ca + 1e-8)
+            states = ca * torch.cumsum(b_scaled, dim=1)
+            sf = states.reshape(B, T, -1)
+        else:
+            mem = self.w_mem[0](cq).view(B, T, self.n_head, self.d_h)
+            decay = torch.sigmoid(self.w_decay[0](cq))
+            a = decay.unsqueeze(-1).expand(-1,-1,-1,self.d_h)
+            ca = torch.cumprod(a, dim=1)
+            b_scaled = mem / (ca + 1e-8)
+            states = ca * torch.cumsum(b_scaled, dim=1)
+            sf = states.reshape(B, T, -1)
+        return self.resid_drop(self.w_out(torch.cat([x, sf], dim=-1)))
 
 class SwiGLU(nn.Module):
     def __init__(self, c):

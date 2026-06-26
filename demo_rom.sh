@@ -1,12 +1,8 @@
 #!/usr/bin/env bash
-# Latent ROM 演示: 写入知识 → 低置信度时自动检索注入
-cd "$(dirname "$0")"
-
-python3 -c "
-import torch
-from rina.rom import LatentROM
-from rina.model_cf import RINA_CF, RINA_CF_Config
-from transformers import GPT2Tokenizer
+# DEPRECATED: CF 路由已弃用 (ROM 机制仍然有效, 集成在 Jamba MLALayer 中)。
+echo "DEPRECATED: CF routing deprecated."
+echo "ROM mechanism still available in Jamba MLALayer (rom_kv parameter)."
+exit 1
 import torch.nn.functional as F
 
 device='cuda'; torch.manual_seed(42)

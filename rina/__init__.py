@@ -1,2 +1,3 @@
-"""RINA — Retrieval Is Not Always Needed: MLA + K→V + GQA + RoPE + SwiGLU + 1.58-bit + int4/2。"""
-from .model import RINA, RINAConfig, BitLinear, q4, q2, ste_round
+"""RINA Gen 6 — Jamba hybrid: SSM(ke3) + Sparse Attention + 全套 4-bit 以下量化。"""
+from .model_jamba import RINA_Jamba, RJ_Config
+from .model_jamba_lq import RINA_Jamba_LQ, RJLQ_Config

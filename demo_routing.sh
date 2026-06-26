@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
-# 置信度调度详细演示: 逐层路由 + 逐步骤生成
-cd "$(dirname "$0")"
-
-python3 -c "
-import torch
-from rina.model_cf import RINA_CF, RINA_CF_Config
-from transformers import GPT2Tokenizer
+# DEPRECATED: CF 动态路由已弃用。
+# 见 rina/model_jamba.py — Jamba 固定层类型混合。
+echo "DEPRECATED: CF routing deprecated. Use Jamba instead."
+echo "  See: rina/test_jamba.py"
+exit 1
 import torch.nn.functional as F
 
 device='cuda'
