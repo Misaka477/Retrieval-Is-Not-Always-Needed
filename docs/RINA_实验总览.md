@@ -3,7 +3,7 @@
 > 从原始实验日志 (`RINA实验日志.md`, 9800+ 行) 整理而成。
 > 按实验阶段组织，突出因果链条和关键结论。
 >
-> **当前版本：** Gen 6 — Jamba 混合架构验证（06-25~06-26）
+> **当前版本：** Gen 6 — Jamba 混合架构验证 + 引擎对齐（07-01）
 
 **项目：** RINA (Retrieval Is Not Always Needed)
 **架构：** MLA + K→V + GQA + RoPE + SwiGLU + int4 K/Q + int2 V + Latent Indexed Attention / Inertia Wave
@@ -835,12 +835,13 @@ CF 动态路由（conf_head 调度 L1/L2/L3）训练未收敛：frozen backbone 
 | **q4** | **3.27** | **+0.01** |
 | q3 | 3.39 | +0.13 |
 
-### 17.5 Jamba QW 极压版 — q4 权重 + LSC q4 + q2+q1 KV（06-26，训练中）
+### 17.5 Jamba QW 极压版 — q4 权重 + LSC q4 + q2+q1 KV（06-26，已训完）
 
 **架构：** `model_jamba_qw.py` — 所有 Linear 层用 Q4Linear（QAT 前向 q4 量化）+ LSC q4 SSM + q2+q1 KV
-
-**预期：** 全套 4-bit 以下，148M 模型从 594MB → ~75MB，推理 KV cache 压缩 10×
-**状态：** 🔄 50K 步训练中
+**演进：**
+- QW1（06-26）：基础版，50K 步 ✅
+- QW2（06-27）：加 K→V 预测，50K 步 ✅
+- QW3（07-01 训练中）：表也走 Q4_0 量化（embed_quant），从 QW1 加载，全 bf16 待验证
 
 ### 17.6 关键结论
 
@@ -852,9 +853,52 @@ CF 动态路由（conf_head 调度 L1/L2/L3）训练未收敛：frozen backbone 
 | q2(K)+q1(V) 3-bit KV | ✅ CE 4.20，与 6-bit 持平 |
 | LSC q4 SSM | ✅ log-space cumsum + q4 可行 |
 | CF 动态路由 | ❌ 训练未收敛，不推荐 |
-| **全套 4-bit 以下** | 🔄 QW 极压版训练中 |
+| **全套 4-bit 以下** | ✅ QW2 已训完，QW3 训练中 |
+| **引擎 fp32 对齐** | ✅ Llama/L3X/Jamba 三个模型推理与 PyTorch 完全一致 |
 
-### 17.7 架构演进路线
+### 18. 引擎 fp32 对齐（06-29~07-01）
+
+**仓库：** `rina-engine/`（C++/CUDA fp32 推理引擎）
+
+### 18.1 对齐结果
+
+| 模型 | logit diff | 推理匹配 |
+|------|-----------|---------|
+| Llama 3.2 1B（GQA） | 1.2e-5 | ✅ 8步 greedy |
+| 纯 L3X（MLA） | 2.85e-04 | ✅ 8步 greedy |
+| Jamba QW2（SSM+MLA） | 5.48e-06 | ✅ 8步 greedy |
+
+### 18.2 修复的引擎 Bug
+
+| # | 模块 | Bug |
+|---|------|-----|
+| 5 | SSM scan | `sf = ca * wcs` 用 unclamped ca，但 wcs 用 `fmaxf(ca,1e-30)` → 不一致 |
+| 6 | SSM agg | ma 输出与 d1 输入内存重叠 |
+| 7 | SSM concat | `[a_blk, sf_blk]` 应为 `[a0,sf0,a1,sf1,...]` 交错 |
+| — | RoPE | Llama（GQA）用 `(i,i+half)`，我们的模型（MLA）用 `(2i,2i+1)`——拆两个 kernel 隔离 |
+| — | ln_f norm | Llama 需 RMSNorm，我们的模型需 LayerNorm——通过 config name 区分 |
+
+### 18.3 文件结构
+
+engine 按架构独立：
+
+```
+src/
+├── arch/gqa/gqa_layer.*    ← 标准 GQA（不动）
+├── arch/ssm/rina_ssm_*     ← 我们的 SSM
+└── arch/mla/rina_mla_*     ← 我们的 MLA
+├── model_infer.cu          ← 推理主路径
+├── model_forward_v2.cu     ← v2 前向
+└── model_train_v2.cu       ← 训练 + backward
+```
+
+### 18.4 已知局限
+
+- 无 KV cache（全量重算 attention），长序列慢
+- 无 bf16/fp16 kernel
+- 无权重量化推理 kernel
+
+### 19. 架构演进路线
 
 ```
 Gen 1 CANN (SSM)         ← 验证 attractor 记忆不可行
@@ -863,10 +907,11 @@ Gen 3 RWKV-MoHE          ← 验证纯 SSM 容量不够
 Gen 4 AR+Denoiser        ← 验证修正器思路可行但复杂
 Gen 5 MLA                ← 回归 Transformer + 三级缓存
   └─ Gen 6 蒸馏          ← 128K 词表 + 老师引导
-  └─ Gen 6 Jamba         ← SSM + Sparse 混合 + 全套 4-bit 量化 ⭐
+  └─ Gen 6 Jamba         ← SSM + Sparse 混合 + 全套 4-bit 量化
+  └─ Gen 6 引擎         ← C++ fp32 引擎三模型对齐 + 模型隔离 (07-01) ⭐
 ```
 
 ---
 
-*整理自 `RINA实验日志.md`（9800+ 行, 2026-05-15~06-26）*
+*整理自 `RINA实验日志.md`（10000+ 行, 2026-05-15~07-01）*
 

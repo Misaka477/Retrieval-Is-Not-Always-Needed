@@ -65,9 +65,9 @@ def train(cfg, steps=50000, lr=1e-3, bsz=1, acc=2,     out='models/out-rina-jamb
             pbar.set_postfix(ce=f'{ce.item() * acc:.2f}', val=f'{ce_v.item():.2f}')
         if step > 0 and step % 500 == 0:
             torch.save({'model': model.state_dict(), 'step': step}, f'{out}/jambaqw3_{step}.pt')
-            keep = sorted([f for f in os.listdir(out) if f.startswith('jambaqw3_') and f.endswith('.pt')],
+            ckpts = sorted([f for f in os.listdir(out) if f.startswith('jambaqw3_') and f.endswith('.pt') and 'final' not in f],
                           key=lambda x: int(x.split('_')[-1].split('.')[0]))
-            for f in keep[:-4]: os.remove(os.path.join(out, f))
+            for f in ckpts[:-5]: os.remove(os.path.join(out, f))
 
     log_file.close()
     torch.save({'model': model.state_dict()}, f'{out}/jambaqw3_final.pt')
