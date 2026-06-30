@@ -3,11 +3,18 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include <sys/stat.h>
 
 struct RinnTensorSpec { std::string name; int shape[4]; int n_dim; int quant_type; size_t size; size_t offset; };
 
 static int read_int32(const uint8_t* p) { return p[0] | (p[1]<<8) | (p[2]<<16) | (p[3]<<24); }
-static std::string read_config(const char* path, ModelConfig& cfg, TensorMap& tensors) {
+static bool is_directory(const char* path) {
+    struct stat st; stat(path, &st); return S_ISDIR(st.st_mode);
+}
+static std::string read_config(const char* path_in, ModelConfig& cfg, TensorMap& tensors) {
+    std::string path_str = path_in;
+    if(is_directory(path_in)) path_str += "/weights.rinn";
+    const char* path = path_str.c_str();
     FILE* f = fopen(path, "rb"); if (!f) return "";
     char hdr[512]; fread(hdr, 1, 512, f);
     if (memcmp(hdr, "RINN", 4) != 0) { fclose(f); return ""; }

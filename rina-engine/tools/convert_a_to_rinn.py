@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Convert RINA L3X (pure MLA) checkpoint to .rinn format (pure fp32)."""
-import struct, json, torch, numpy as np, sys
+import os, struct, json, torch, numpy as np, sys, shutil
 
 def gen_config():
     return {
@@ -63,15 +63,24 @@ def convert(ckpt_path, output_path):
         add_tensor(tensors, f"{prefix}path.rope.cos", cos_k)
         add_tensor(tensors, f"{prefix}path.rope.sin", sin_k)
 
-    # Write .rinn
+    # Write .rinn (or hybrid directory)
     ies = lambda n: 2 + len(n.encode()) + 4*4 + 1 + 2 + 8 + 8
     idx_sz = sum(ies(t["name"]) for t in tensors)
     data_off = ((512 + len(cj) + idx_sz + 255) // 256) * 256
     off = data_off
     for t in tensors: t["offset"] = off; off += t["size"]
 
-    print(f"Writing {output_path} ({len(tensors)} tensors, {off/1024/1024:.0f} MB)...")
-    with open(output_path, "wb") as f:
+    # Check if output is hybrid directory: if path has no extension, treat as dir
+    is_dir = '.' not in os.path.basename(output_path)
+    if is_dir:
+        os.makedirs(output_path, exist_ok=True)
+        rinn_path = os.path.join(output_path, "weights.rinn")
+    else:
+        rinn_path = output_path
+    
+    print(f"Writing {rinn_path} ({len(tensors)} tensors, {off/1024/1024:.0f} MB)...")
+    os.makedirs(os.path.dirname(rinn_path) or '.', exist_ok=True)
+    with open(rinn_path, "wb") as f:
         hdr = bytearray(512)
         hdr[0:4] = b"RINN"; struct.pack_into("<I", hdr, 4, 1)
         struct.pack_into("<I", hdr, 8, len(tensors))
@@ -90,7 +99,24 @@ def convert(ckpt_path, output_path):
         pad = data_off - f.tell()
         if pad > 0: f.write(b"\x00" * pad)
         for t in tensors: f.write(t["data"])
-    print(f"Done: {output_path}")
+    
+    # Copy tokenizer if available (from HF checkpoint path or teacher model)
+    # For L3X, look for tokenizer files alongside the checkpoint
+    ckpt_dir = os.path.dirname(os.path.abspath(ckpt))
+    teacher = os.path.join(os.path.dirname(ckpt_dir), "teacher", "LLM-Research", "Llama-3___2-1B-Instruct")
+    for tok_file in ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"]:
+        src = os.path.join(ckpt_dir, tok_file)
+        if not os.path.exists(src):
+            src = os.path.join(teacher, tok_file)
+        if os.path.exists(src) and is_dir:
+            import shutil; shutil.copy2(src, os.path.join(output_path, tok_file))
+    
+    if is_dir:
+        # Also save config.json for hybrid format
+        with open(os.path.join(output_path, "config.json"), "w") as f:
+            json.dump(config, f, indent=2)
+    
+    print(f"Done: {rinn_path}")
 
 if __name__ == "__main__":
     ckpt = sys.argv[1] if len(sys.argv) > 1 else "models/out-0.1b-a-v2/a_final.pt"

@@ -9,6 +9,7 @@
 #include <vector>
 #include "core/config.h"
 #include "core/tensor.h"
+#include "core/tokenizer.h"
 #include "model.h"
 
 #ifdef RINA_WITH_PYTORCH
@@ -19,6 +20,7 @@ extern "C" void pt_free();
 #endif
 
 static std::mt19937 rng;
+static std::string g_prompt_text;
 
 static int sample(const float* logits, int n, float temp, int topk, float topp, float rep, const std::vector<int>& gen, bool greedy) {
     if (greedy || temp <= 0) {
@@ -107,6 +109,17 @@ int main(int argc, char** argv) {
                 while (*p && *p != ' ') p++;
             }
         }
+        else if (strcmp(argv[i], "--prompt") == 0 || strcmp(argv[i], "--text") == 0) {
+            g_prompt_text = argv[++i];
+        }
+        else if (strcmp(argv[i], "--ids") == 0) {
+            const char* p = argv[++i]; while (*p) {
+                while (*p == ' ') p++;
+                if (*p == 0) break;
+                prompt.push_back(atoi(p));
+                while (*p && *p != ' ') p++;
+            }
+        }
         else if (strcmp(argv[i], "--steps") == 0) steps = atoi(argv[++i]);
         else if (strcmp(argv[i], "--temp") == 0) { temp = atof(argv[++i]); greedy = false; }
         else if (strcmp(argv[i], "--topk") == 0) topk = atoi(argv[++i]);
@@ -116,7 +129,7 @@ int main(int argc, char** argv) {
     }
     if (seed) rng.seed(seed);
 
-    if (!model_path) { fprintf(stderr, "Usage: rina_infer --model model.rinn --ids \"1 2 3\" [--steps N]\n"); return 1; }
+    if (!model_path) { fprintf(stderr, "Usage: rina_infer --model model.rinn [--prompt \"Hello\"] [--ids \"1 2 3\"] [--steps N]\n"); return 1; }
 
     ModelConfig cfg;
     TensorMap weights;
@@ -127,6 +140,18 @@ int main(int argc, char** argv) {
     fprintf(stderr, "Model: %s (%d layers, dim=%d, vocab=%d) %s\n",
         cfg.name.c_str(), cfg.n_layers, cfg.dim, cfg.vocab_size,
         use_pytorch ? "[PyTorch ref]" : "[Custom engine]");
+    
+    // Load tokenizer from model directory (if available)
+    RINNModel rinn;
+    rinn.load(model_path);
+    if(!g_prompt_text.empty()){
+        if(rinn.tokenizer.vocab_size() > 0){
+            prompt = rinn.tokenizer.encode(g_prompt_text);
+            fprintf(stderr, "  prompt=\"%s\" → %zu tokens\n", g_prompt_text.c_str(), prompt.size());
+        } else {
+            fprintf(stderr, "  warning: no tokenizer found in model, use --ids instead\n");
+        }
+    }
 
 #ifdef RINA_WITH_PYTORCH
     if (use_pytorch) pt_init(cfg, weights, true/*embed*/, true/*ln*/, false/*attn*/, true/*cproj*/, true/*mlp*/);

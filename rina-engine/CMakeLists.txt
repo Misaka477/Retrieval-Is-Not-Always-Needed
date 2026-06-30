@@ -17,7 +17,7 @@ if(EXISTS ${TORCH_ROOT})
 endif()
 
 set(RINA_SRC src/loader.cpp src/main.cpp src/core/layer.cpp src/core/buffer.cpp
-    src/core/tape.cpp src/core/layers_fp32.cpp
+    src/core/tape.cpp src/core/layers_fp32.cpp src/core/tokenizer.cpp
     src/model_pytorch.cpp)
 
 set(RINA_CUDA_SRC
