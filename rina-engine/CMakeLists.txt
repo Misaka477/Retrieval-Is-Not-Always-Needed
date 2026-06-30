@@ -21,14 +21,14 @@ set(RINA_SRC src/loader.cpp src/main.cpp src/core/layer.cpp src/core/buffer.cpp
     src/model_pytorch.cpp)
 
 set(RINA_CUDA_SRC
-    src/kernels/rope_fp32.cu src/kernels/embedding.cu src/kernels/pytorch_ln_kernel.cu
+    src/kernels/rope_fp32.cu src/kernels/rope_fp32_hf.cu src/kernels/embedding.cu src/kernels/pytorch_ln_kernel.cu
     src/kernels/rms_norm.cu src/kernels/build_qkv_fp32.cu src/kernels/flash_fp32.cu
     src/kernels/quantize.cu src/kernels/sparse_attn.cu src/kernels/linear_fp32.cu
     src/kernels/ssm_kernels_fp32.cu src/kernels/ssm_lsc_scan.cu src/kernels/activation_fp32.cu
     src/kernels/loss_fp32.cu src/kernels/norm_fp32.cu
-    src/model_fp32.cu src/kernels/optimizer_fp32.cu src/train_fp32.cu
-    src/model_v2.cu
-    src/arch/gqa/gqa_layer.cu src/arch/ssm/ssm_layer.cu src/arch/mla/mla_layer.cu
+    src/model_fp32.cu src/model_infer.cu src/model_forward_v2.cu src/model_train_v2.cu
+    src/kernels/optimizer_fp32.cu src/train_fp32.cu
+    src/arch/gqa/gqa_layer.cu src/arch/ssm/rina_ssm_layer.cu src/arch/mla/rina_mla_layer.cu
     src/arch/register_layers.cu src/training/train.cu)
 
 add_executable(rina_infer ${RINA_SRC} ${RINA_CUDA_SRC})
@@ -64,3 +64,16 @@ if(DEFINED TORCH_ROOT)
     set_target_properties(rina_infer PROPERTIES
         BUILD_RPATH "${TORCH_ROOT}/lib" INSTALL_RPATH "${TORCH_ROOT}/lib")
 endif()
+add_rina_test(test_infer tests/test_infer.cu)
+add_rina_test(test_jamba_align tests/test_jamba_align.cu)
+add_rina_test(test_jamba_step tests/test_jamba_step.cu)
+add_rina_test(test_linear_direct tests/test_linear_direct.cu)
+add_rina_test(test_verify_weights tests/test_verify_weights.cu)
+add_rina_test(test_linear_m3 tests/test_linear_m3.cu)
+add_rina_test(test_ssm_weights tests/test_ssm_weights.cu)
+add_rina_test(test_save_ptr tests/test_save_ptr.cu)
+add_rina_test(test_mla_align tests/test_mla_align.cu)
+add_rina_test(test_a_align tests/test_a_align.cu)
+add_rina_test(test_jamba_mla_step tests/test_jamba_mla_step.cu)
+add_rina_test(test_jamba_fwd_dump tests/test_jamba_fwd_dump.cu)
+add_rina_test(test_jamba_compare_fwd tests/test_jamba_compare_fwd.cu)

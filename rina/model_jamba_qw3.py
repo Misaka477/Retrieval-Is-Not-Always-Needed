@@ -1,4 +1,4 @@
-"""RINA-Jamba-QW2: Q4_0 block-wise 量化 + 全张量化（含 embedding/head）
+"""RINA-Jamba-QW3: QW2 + 表也走 Q4_0 量化
 QAT 量化格式与推理引擎 dequant_matmul kernel 完全一致。
 """
 import math
@@ -55,7 +55,7 @@ class Q4BlockLinear(nn.Module):
 
 
 @dataclass
-class QW2_Config:
+class QW3_Config:
     block_size: int = 1024
     vocab_size: int = 50304
     n_layer: int = 12
@@ -75,6 +75,7 @@ class QW2_Config:
     quant_mode: str = 'q2k_q1v'
     ssm_qbits: int = 4
     weight_bits: int = 4
+    embed_quant: bool = True
     layer_types: tuple = None
 
 
@@ -240,9 +241,9 @@ class QW2Block(nn.Module):
         r = x + out; return r + self.mlp(self.ln2(r))
 
 
-class RINA_Jamba_QW2(nn.Module):
+class RINA_Jamba_QW3(nn.Module):
     def __init__(self, c):
-        super().__init__(); self.config = c
+        super().__init__(); self.config = c; self.embed_quant = c.embed_quant
         if c.layer_types is not None: ltypes = list(c.layer_types)
         else:
             n_sparse = max(4, c.n_layer // 4); n_ssm = c.n_layer - n_sparse
@@ -260,13 +261,17 @@ class RINA_Jamba_QW2(nn.Module):
         self.lm_head = Q4BlockLinear(c.n_embd, c.vocab_size, bias=c.bias, weight_bits=c.weight_bits)
         self.transformer.wte.weight = self.lm_head.weight
         core = sum(p.numel() for p in self.parameters()) - self.transformer.wte.weight.numel()
-        print(f'RINA_Jamba_QW2: {core/1e6:.2f}M core | {sum(p.numel() for p in self.parameters())/1e6:.2f}M total')
+        print(f'RINA_Jamba_QW3: {core/1e6:.2f}M core | {sum(p.numel() for p in self.parameters())/1e6:.2f}M total')
         for i, t in enumerate(ltypes):
             print(f'  layer {i}: {"SSM(L1)" if t==0 else "Sparse(L3X)"}')
 
     def forward(self, idx, targets=None, rom_kv=None, sparse_mgr=None):
         B, T = idx.size(); assert T <= self.config.block_size
-        x = self.transformer.drop(self.transformer.wte(idx))
+        if self.embed_quant and self.training:
+            w = q4_0_block(self.transformer.wte.weight)
+            x = self.transformer.drop(F.embedding(idx, w))
+        else:
+            x = self.transformer.drop(self.transformer.wte(idx))
         for b in self.transformer.h: x = b(x, sparse_mgr, rom_kv)
         x = self.transformer.ln_f(x); l = self.lm_head(x)
         if targets is not None:

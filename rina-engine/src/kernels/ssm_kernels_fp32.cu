@@ -36,7 +36,7 @@ __global__ void ssm_scan_f32_k(const float* mem, const float* decay, float* sf,
         int idx = ((b * T + t) * H + h);
         float dv = decay[idx]; if (dv <= 1e-38f) dv = 1e-38f;
         lcs += logf(dv); float ca = expf(lcs);
-        wcs += mem[idx * dh + d] / (ca + 1e-8f);
+        wcs += mem[idx * dh + d] / fmaxf(ca, 1e-30f);
         sf[idx * dh + d] = ca * wcs;
     }
 }

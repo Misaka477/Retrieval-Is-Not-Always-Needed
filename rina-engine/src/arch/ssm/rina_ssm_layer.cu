@@ -50,7 +50,7 @@ static size_t wg_offset_of(const TensorMap& w, const std::string& name) {
     return (size_t)-1;
 }
 
-struct SSMImpl {
+struct RinaSSMImpl {
     int d, H, Hkv, dh, dc, hd, ssm_steps;
     const float *w_dq, *q_norm_w, *w_mem[3], *w_decay[3], *w_out;
     const float *w1, *w2, *w3, *ln1_w, *ln2_w;
@@ -96,13 +96,17 @@ struct SSMImpl {
             launch_linear_fp32(bufs.m,w_decay[k],bufs.m+doff+k*n*H,n,H,dc,stream);
             cudaMemcpyAsync(bufs.save+(off_db+k*H)*n,bufs.m+doff+k*n*H,n*H*sizeof(float),cudaMemcpyDeviceToDevice,stream);
             launch_sigmoid_fp32(bufs.m+doff+k*n*H,n*H,stream);}
-        float* da=bufs.m+doff, *ma=da+n*H;
-        launch_ssm_agg_fp32(bufs.m+ncq,bufs.m+ncq+ms,bufs.m+ncq+2*ms,da,da+n*H,da+2*n*H,da,ma,H,dh,n,stream);
+        float* da=bufs.m+doff;
+        float* ma=bufs.m+doff+3*n*H;
+        launch_ssm_agg_fp32(bufs.m+ncq,bufs.m+ncq+ms,bufs.m+ncq+2*ms,
+                            da,da+n*H,da+2*n*H,da,ma,H,dh,n,stream);
         cudaMemcpyAsync(bufs.save+off_mems*n,bufs.m+ncq,3*ms*sizeof(float),cudaMemcpyDeviceToDevice,stream);
         cudaMemcpyAsync(bufs.save+off_ds*n,da,3*n*H*sizeof(float),cudaMemcpyDeviceToDevice,stream);
         launch_ssm_scan_fp32(ma,da,ma,B,T,H,dh,stream);
-        cudaMemcpyAsync(bufs.m,bufs.a,n*d*sizeof(float),cudaMemcpyDeviceToDevice,stream);
-        cudaMemcpyAsync(bufs.m+n*d,ma,n*H*dh*sizeof(float),cudaMemcpyDeviceToDevice,stream);
+        for(int i=0;i<n;i++){
+            cudaMemcpyAsync(bufs.m+i*d2,bufs.a+i*d,d*sizeof(float),cudaMemcpyDeviceToDevice,stream);
+            cudaMemcpyAsync(bufs.m+i*d2+d,ma+i*H*dh,H*dh*sizeof(float),cudaMemcpyDeviceToDevice,stream);
+        }
         launch_linear_fp32(bufs.m,w_out,bufs.a,n,d,d2,stream);
         add_f32_s<<<(n*d+BLK-1)/BLK,BLK,0,stream>>>(h,h,bufs.a,n*d);
         cudaMemcpyAsync(bufs.save+off_ln2_in*n,h,n*d*sizeof(float),cudaMemcpyDeviceToDevice,stream);
@@ -182,12 +186,12 @@ struct SSMImpl {
 };
 
 extern "C" {
-static bool ssm_init(void* s,const ModelConfig& c,const TensorMap& w,int l){return ((SSMImpl*)s)->init(c,w,l);}
-static void ssm_fwd(void* s,float* h,ForwardBuffers& b,int B,int T,cudaStream_t st){((SSMImpl*)s)->forward(h,b,B,T,st);}
-static void ssm_bwd(void* s,GradBuffers& g,ForwardBuffers& b,float* wg,int B,int T,cudaStream_t st){((SSMImpl*)s)->backward(g,b,wg,B,T,st);}
-static int ssm_ws(void* s,int d,int h,int hd){return ((SSMImpl*)s)->workspace_per_token();}
-static int ssm_sv(void* s,int d,int h,int hd){return ((SSMImpl*)s)->saved_per_token();}
-static void ssm_del(void* s){delete(SSMImpl*)s;}
+static bool ssm_init(void* s,const ModelConfig& c,const TensorMap& w,int l){return ((RinaSSMImpl*)s)->init(c,w,l);}
+static void ssm_fwd(void* s,float* h,ForwardBuffers& b,int B,int T,cudaStream_t st){((RinaSSMImpl*)s)->forward(h,b,B,T,st);}
+static void ssm_bwd(void* s,GradBuffers& g,ForwardBuffers& b,float* wg,int B,int T,cudaStream_t st){((RinaSSMImpl*)s)->backward(g,b,wg,B,T,st);}
+static int ssm_ws(void* s,int d,int h,int hd){return ((RinaSSMImpl*)s)->workspace_per_token();}
+static int ssm_sv(void* s,int d,int h,int hd){return ((RinaSSMImpl*)s)->saved_per_token();}
+static void ssm_del(void* s){delete(RinaSSMImpl*)s;}
 }
 static const LayerVTable ssm_vtab={ssm_init,ssm_fwd,ssm_bwd,ssm_ws,ssm_sv,ssm_del};
-Layer create_ssm_layer(){Layer l;l.impl=new SSMImpl();l.vtab=&ssm_vtab;return l;}
+Layer create_rina_ssm_layer(){Layer l;l.impl=new RinaSSMImpl();l.vtab=&ssm_vtab;return l;}

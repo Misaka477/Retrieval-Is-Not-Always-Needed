@@ -149,7 +149,7 @@ int main(int argc, char** argv) {
         } else
 #endif
         {
-            model_forward_fp32(cfg, weights, d_ids, d_logits, 1, gen.size(), s);
+            model_forward_direct(cfg, weights, d_ids, d_logits, 1, gen.size(), s);
         }
         cudaStreamSynchronize(s);
 
