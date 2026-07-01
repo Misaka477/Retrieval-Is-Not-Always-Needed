@@ -62,7 +62,8 @@ def train(cfg, steps=50000, lr=1e-3, bsz=1, acc=2,     out='models/out-rina-jamb
                 lv, ce_v = model(xv[:, :-1], xv[:, 1:])
             model.train()
             ce_train = ce.item() * acc
-            msg = f'step={step} ce={ce_train:.2f} val={ce_v.item():.2f} gn={last_gn:.2f}'
+            lr_now = sched.get_last_lr()[0]
+            msg = f'step={step} ce={ce_train:.2f} val={ce_v.item():.2f} gn={last_gn:.2f} lr={lr_now:.1e}'
             log_file.write(msg + '\n'); log_file.flush()
             pbar.set_postfix(ce=f'{ce_train:.2f}', val=f'{ce_v.item():.2f}', gn=f'{last_gn:.2f}')
         if step > 0 and step % 500 == 0:
@@ -85,13 +86,27 @@ if __name__ == '__main__':
     p.add_argument('--seq', type=int, default=512)
     p.add_argument('--out', type=str, default='models/out-rina-jamba-qw3')
     p.add_argument('--resume', type=str, default=None)
+    p.add_argument('--phase2', action='store_true',
+                   help='Phase 2: enable all quantization (weights+ssm+kv+embed). Load Phase 1 checkpoint via --resume.')
     p.add_argument('--weight_bits', type=int, default=4)
     p.add_argument('--ssm_q', type=int, default=4)
     args = p.parse_args()
-    cfg = QW3_Config(vocab_size=128256, block_size=args.seq, use_int4=True,
-                     n_embd=640, n_layer=16, n_head=10, n_kv_heads=5,
-                     d_c=160, head_dim=64,
-                     sparse_k=16, sparse_window=32, sparse_local_w=4,
-                     ssm_steps=3, quant_mode='q2k_q1v',
-                     ssm_qbits=args.ssm_q, weight_bits=args.weight_bits, embed_quant=True)
-    train(cfg, steps=args.steps, lr=args.lr, bsz=args.bsz, acc=args.acc, out=args.out, resume=args.resume)
+    
+    if args.phase2:
+        # Phase 2: full quantization. Load Phase 1 checkpoint (fp32 weights → q4 compatible).
+        cfg = QW3_Config(vocab_size=128256, block_size=args.seq, use_int4=True,
+                         n_embd=640, n_layer=16, n_head=10, n_kv_heads=5,
+                         d_c=160, head_dim=64,
+                         sparse_k=16, sparse_window=32, sparse_local_w=4,
+                         ssm_steps=3, quant_mode='q2k_q1v',
+                         ssm_qbits=args.ssm_q, weight_bits=args.weight_bits, embed_quant=True)
+        train(cfg, steps=args.steps, lr=args.lr, bsz=args.bsz, acc=args.acc, out=args.out, resume=args.resume)
+    else:
+        # Phase 1: pure fp32, no quantization at all.
+        cfg = QW3_Config(vocab_size=128256, block_size=args.seq, use_int4=False,
+                         n_embd=640, n_layer=16, n_head=10, n_kv_heads=5,
+                         d_c=160, head_dim=64,
+                         sparse_k=16, sparse_window=32, sparse_local_w=4,
+                         ssm_steps=3, quant_mode='q4k_q2v',
+                         ssm_qbits=0, weight_bits=16, embed_quant=False)
+        train(cfg, steps=args.steps, lr=args.lr, bsz=args.bsz, acc=args.acc, out=args.out, resume=args.resume)
