@@ -12,7 +12,8 @@ def train(cfg, steps=50000, lr=1e-3, bsz=1, acc=2,     out='models/out-rina-jamb
     data_path = os.path.join(BASE, 'data/mix_pretrain_llama_v2.npy')
     os.makedirs(out, exist_ok=True)
     data = np.load(data_path, mmap_mode='r')
-    N = len(data); val_len = N // 10
+    N = len(data); val_len = min(100000, N // 10)  # fixed 100KB validation
+    val_data = torch.from_numpy(data[N-val_len-512:N-val_len].copy()).long()  # fixed val block
     log_file = open(os.path.join(out, 'train.log'), 'a' if resume else 'w')
 
     def get_batch(s):
@@ -40,7 +41,7 @@ def train(cfg, steps=50000, lr=1e-3, bsz=1, acc=2,     out='models/out-rina-jamb
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.1, betas=(0.9, 0.95))
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, steps)
     pbar = tqdm(range(start_step, steps)); t0 = time.time()
-    accum_step = 0
+    accum_step = 0; last_gn = 0.0
 
     for step in pbar:
         x = get_batch(cfg.block_size + 1)
@@ -50,19 +51,20 @@ def train(cfg, steps=50000, lr=1e-3, bsz=1, acc=2,     out='models/out-rina-jamb
         accum_step += 1
 
         if accum_step % acc == 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            last_gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).item()
             opt.step(); sched.step()
             opt.zero_grad()
 
         if step % 50 == 0:
             model.eval()
             with torch.no_grad():
-                xv = get_batch(cfg.block_size + 1)
+                xv = val_data[:cfg.block_size+1].unsqueeze(0).cuda()
                 lv, ce_v = model(xv[:, :-1], xv[:, 1:])
             model.train()
-            msg = f'step={step} ce={ce.item() * acc:.2f} val={ce_v.item():.2f}'
+            ce_train = ce.item() * acc
+            msg = f'step={step} ce={ce_train:.2f} val={ce_v.item():.2f} gn={last_gn:.2f}'
             log_file.write(msg + '\n'); log_file.flush()
-            pbar.set_postfix(ce=f'{ce.item() * acc:.2f}', val=f'{ce_v.item():.2f}')
+            pbar.set_postfix(ce=f'{ce_train:.2f}', val=f'{ce_v.item():.2f}', gn=f'{last_gn:.2f}')
         if step > 0 and step % 500 == 0:
             torch.save({'model': model.state_dict(), 'step': step}, f'{out}/jambaqw3_{step}.pt')
             ckpts = sorted([f for f in os.listdir(out) if f.startswith('jambaqw3_') and f.endswith('.pt') and 'final' not in f],
