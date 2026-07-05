@@ -25,7 +25,7 @@ extern void launch_layernorm_bwd_fp32(const float*, const float*, const float*,
     float*, float*, int, int, cudaStream_t);
 extern float launch_crossentropy_fp32(const float*, const int*, float*, int, int, cudaStream_t);
 extern void launch_embedding_bwd_fp32(const float*, const int*, float*, int, int, int, cudaStream_t);
-extern void launch_rope_fp32(float*, const float*, const float*, int, int, int, int, cudaStream_t);
+extern void launch_rope_fp32(float*, const float*, const float*, int, int, int, int, cudaStream_t, int start_pos = 0);
 extern void launch_rope_bwd_fp32(float*, const float*, const float*, const float*,
     int, int, int, int, cudaStream_t);
 extern void launch_ssm_scan_bwd_fp32(const float*, const float*, const float*, const float*,

@@ -9,7 +9,7 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def train(cfg, steps=50000, lr=1e-3, bsz=1, acc=2,     out='models/out-rina-jamba-qw3', resume=None):
-    data_path = os.path.join(BASE, 'data/mix_pretrain_llama_v2.npy')
+    data_path = os.path.join(BASE, 'data/mix_pretrain_llama_v3.npy')
     os.makedirs(out, exist_ok=True)
     data = np.load(data_path, mmap_mode='r')
     N = len(data); val_len = min(100000, N // 10)  # fixed 100KB validation

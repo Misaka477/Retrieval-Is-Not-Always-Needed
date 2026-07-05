@@ -3,6 +3,7 @@
 // K and V are loaded in Bc-sized tiles and reused across all Q rows in the tile.
 // Online softmax: incremental m (row max), l (row sum), O partial sums.
 #include <cuda_runtime.h>
+#include <cuda_bf16.h>
 #include <cmath>
 
 #define Br 32
@@ -333,4 +334,218 @@ void launch_flash_attn_bwd_fp32(const float* Q, const float* K,
     dim3 grid(Bh, grid_y);
     flashattn_bwd_v2<<<grid, 32, shmem, stream>>>(Q, K, V, O, dO, m_saved, l_saved,
         dQ, dK, dV, Bh, T, dq, dh);
+}
+
+// ════════════════════════════════════════════════════════════════
+// bf16 FlashAttention forward (no stats saved, for inference)
+// ════════════════════════════════════════════════════════════════
+
+#define Br_bf 32
+#define Bc_bf 32
+
+__global__ void flashattn_fwd_tiled_bf16(
+    const __nv_bfloat16* __restrict__ Q,
+    const __nv_bfloat16* __restrict__ K,
+    const __nv_bfloat16* __restrict__ V,
+    __nv_bfloat16* __restrict__ O,
+    int Bh, int T, int dq, int dh) {
+    extern __shared__ __nv_bfloat16 smem_bf[];
+    __nv_bfloat16* K_smem = smem_bf;
+    __nv_bfloat16* V_smem = K_smem + Bc_bf * dq;
+    __nv_bfloat16* O_smem = V_smem + Bc_bf * dh;
+
+    int bh = blockIdx.x;
+    int q_start = blockIdx.y * Br_bf;
+    if (bh >= Bh || q_start >= T) return;
+    int q_end = min(q_start + Br_bf, T);
+    int nq = q_end - q_start;
+
+    const __nv_bfloat16* Qb = Q + (size_t)bh * T * dq;
+    const __nv_bfloat16* Kb = K + (size_t)bh * T * dq;
+    const __nv_bfloat16* Vb = V + (size_t)bh * T * dh;
+    __nv_bfloat16* Ob = O + (size_t)bh * T * dh;
+
+    for (int i = threadIdx.x; i < nq * dh; i += blockDim.x) O_smem[i] = __float2bfloat16(0.0f);
+
+    float m_row[Br_bf], l_row[Br_bf];
+    for (int i = 0; i < nq; i++) { m_row[i] = -1e10f; l_row[i] = 0.0f; }
+
+    for (int k_start = 0; k_start < T; k_start += Bc_bf) {
+        int k_end = min(k_start + Bc_bf, T);
+        int nk = k_end - k_start;
+
+        for (int i = threadIdx.x; i < nk * dq; i += blockDim.x)
+            K_smem[i] = Kb[(size_t)(k_start + i / dq) * dq + i % dq];
+        for (int i = threadIdx.x; i < nk * dh; i += blockDim.x)
+            V_smem[i] = Vb[(size_t)(k_start + i / dh) * dh + i % dh];
+        __syncthreads();
+
+        for (int i = 0; i < nq; i++) {
+            int qi = q_start + i;
+            if (qi >= T) break;
+            float m = m_row[i], l = l_row[i];
+            const __nv_bfloat16* q_ptr = Qb + (size_t)qi * dq;
+
+            for (int kj = 0; kj < nk; kj++) {
+                int kj_global = k_start + kj;
+                if (kj_global > qi) break;
+
+                float dot = 0.0f;
+                for (int d = threadIdx.x; d < dq; d += blockDim.x)
+                    dot += __bfloat162float(q_ptr[d]) * __bfloat162float(K_smem[(size_t)kj * dq + d]);
+                for (int w = 16; w > 0; w >>= 1) dot += __shfl_xor_sync(0xFFFFFFFF, dot, w);
+
+                if (threadIdx.x == 0) {
+                    float s = dot * rsqrtf((float)dq);
+                    float old_l = l;
+                    float new_m = fmaxf(m, s);
+                    l = l * expf(m - new_m) + expf(s - new_m);
+                    m = new_m;
+
+                    float scale_old = old_l * expf(m_row[i] - m) / l;
+                    float scale_new = expf(s - m) / l;
+                    for (int d = 0; d < dh; d++)
+                        O_smem[(size_t)i * dh + d] = __float2bfloat16(
+                            __bfloat162float(O_smem[(size_t)i * dh + d]) * scale_old
+                            + __bfloat162float(V_smem[(size_t)kj * dh + d]) * scale_new);
+                    m_row[i] = m; l_row[i] = l;
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+    for (int i = 0; i < nq; i++) {
+        int qi = q_start + i;
+        if (qi >= T) break;
+        for (int d = threadIdx.x; d < dh; d += blockDim.x)
+            Ob[(size_t)qi * dh + d] = O_smem[(size_t)i * dh + d];
+    }
+}
+
+void launch_flash_attn_bf16(
+    const __nv_bfloat16* Q, const __nv_bfloat16* K, const __nv_bfloat16* V, __nv_bfloat16* O,
+    int B, int H, int T, int dq, int dh, cudaStream_t stream) {
+    int Bh = B * H;
+    int grid_y = (T + Br_bf - 1) / Br_bf;
+    int shmem = (Bc_bf * dq + Bc_bf * dh + Br_bf * dh) * sizeof(__nv_bfloat16);
+    dim3 grid(Bh, grid_y);
+    flashattn_fwd_tiled_bf16<<<grid, 32, shmem, stream>>>(Q, K, V, O, Bh, T, dq, dh);
+}
+
+// bf16 FlashAttention with stats saved (for training backward)
+__global__ void flashattn_fwd_save_stats_bf16(
+    const __nv_bfloat16* __restrict__ Q,
+    const __nv_bfloat16* __restrict__ K,
+    const __nv_bfloat16* __restrict__ V,
+    __nv_bfloat16* __restrict__ O,
+    float* __restrict__ m_out, float* __restrict__ l_out,
+    int Bh, int T, int dq, int dh) {
+    extern __shared__ __nv_bfloat16 smem_bf[];
+    __nv_bfloat16* K_smem = smem_bf;
+    __nv_bfloat16* V_smem = K_smem + Bc_bf * dq;
+    __nv_bfloat16* O_smem = V_smem + Bc_bf * dh;
+
+    int bh = blockIdx.x;
+    int q_start = blockIdx.y * Br_bf;
+    if (bh >= Bh || q_start >= T) return;
+    int q_end = min(q_start + Br_bf, T);
+    int nq = q_end - q_start;
+
+    const __nv_bfloat16* Qb = Q + (size_t)bh * T * dq;
+    const __nv_bfloat16* Kb = K + (size_t)bh * T * dq;
+    const __nv_bfloat16* Vb = V + (size_t)bh * T * dh;
+    __nv_bfloat16* Ob = O + (size_t)bh * T * dh;
+    float* mb = m_out + (size_t)bh * T;
+    float* lb = l_out + (size_t)bh * T;
+
+    for (int i = threadIdx.x; i < nq * dh; i += blockDim.x) O_smem[i] = __float2bfloat16(0.0f);
+
+    float m_row[Br_bf], l_row[Br_bf];
+    for (int i = 0; i < nq; i++) { m_row[i] = -1e10f; l_row[i] = 0.0f; }
+
+    for (int k_start = 0; k_start < T; k_start += Bc_bf) {
+        int k_end = min(k_start + Bc_bf, T);
+        int nk = k_end - k_start;
+
+        for (int i = threadIdx.x; i < nk * dq; i += blockDim.x)
+            K_smem[i] = Kb[(size_t)(k_start + i / dq) * dq + i % dq];
+        for (int i = threadIdx.x; i < nk * dh; i += blockDim.x)
+            V_smem[i] = Vb[(size_t)(k_start + i / dh) * dh + i % dh];
+        __syncthreads();
+
+        float scale = rsqrtf((float)dq);
+        for (int i = 0; i < nq; i++) {
+            int qi = q_start + i;
+            if (qi >= T) break;
+            float m = m_row[i], l = l_row[i];
+            const __nv_bfloat16* q_ptr = Qb + (size_t)qi * dq;
+
+            for (int kj = 0; kj < nk; kj++) {
+                int kj_global = k_start + kj;
+                if (kj_global > qi) break;
+
+                float dot = 0.0f;
+                for (int d = threadIdx.x; d < dq; d += blockDim.x)
+                    dot += __bfloat162float(q_ptr[d]) * __bfloat162float(K_smem[(size_t)kj * dq + d]);
+                for (int w = 16; w > 0; w >>= 1) dot += __shfl_xor_sync(0xFFFFFFFF, dot, w);
+
+                if (threadIdx.x == 0) {
+                    float s = dot * scale;
+                    float old_l = l;
+                    float new_m = fmaxf(m, s);
+                    l = l * expf(m - new_m) + expf(s - new_m);
+                    m = new_m;
+                    float scale_old = old_l * expf(m_row[i] - m) / l;
+                    float scale_new = expf(s - m) / l;
+                    for (int d = 0; d < dh; d++)
+                        O_smem[(size_t)i * dh + d] = __float2bfloat16(
+                            __bfloat162float(O_smem[(size_t)i * dh + d]) * scale_old
+                            + __bfloat162float(V_smem[(size_t)kj * dh + d]) * scale_new);
+                    m_row[i] = m; l_row[i] = l;
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+    for (int i = 0; i < nq; i++) {
+        int qi = q_start + i;
+        if (qi >= T) break;
+        for (int d = threadIdx.x; d < dh; d += blockDim.x)
+            Ob[(size_t)qi * dh + d] = O_smem[(size_t)i * dh + d];
+        if (threadIdx.x == 0) {
+            mb[qi] = m_row[i];
+            lb[qi] = l_row[i];
+        }
+    }
+}
+
+void launch_flashattn_fwd_save_stats_bf16(
+    const __nv_bfloat16* Q, const __nv_bfloat16* K,
+    const __nv_bfloat16* V, __nv_bfloat16* O,
+    float* m_out, float* l_out,
+    int B, int H, int T, int dq, int dh, cudaStream_t stream) {
+    int Bh = B * H;
+    int grid_y = (T + Br_bf - 1) / Br_bf;
+    int shmem = (Bc_bf * dq + Bc_bf * dh + Br_bf * dh) * sizeof(__nv_bfloat16);
+    dim3 grid(Bh, grid_y);
+    flashattn_fwd_save_stats_bf16<<<grid, 32, shmem, stream>>>(
+        Q, K, V, O, m_out, l_out, Bh, T, dq, dh);
+}
+
+// bf16 transpose attention output: [H,T,dh] → [T,H*dh]
+__global__ void transpose_attn_bf16_k(
+    __nv_bfloat16* dst, const __nv_bfloat16* src, int H, int T, int dh) {
+    int h = blockIdx.x * 16 + threadIdx.x;
+    int t = blockIdx.y * 16 + threadIdx.y;
+    if (h >= H || t >= T) return;
+    for (int d = 0; d < dh; d++)
+        dst[(size_t)t * H * dh + (size_t)h * dh + d] = src[(size_t)h * T * dh + (size_t)t * dh + d];
+}
+
+void launch_transpose_attn_bf16(
+    __nv_bfloat16* dst, const __nv_bfloat16* src, int H, int T, int dh, cudaStream_t stream) {
+    dim3 grid((H + 15) / 16, (T + 15) / 16);
+    transpose_attn_bf16_k<<<grid, dim3(16, 16), 0, stream>>>(dst, src, H, T, dh);
 }

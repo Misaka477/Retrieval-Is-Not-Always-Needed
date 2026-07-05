@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# rina-run — One-command RINA inference CLI
+# Loads HF models directly, runs inference.
+#
+# Usage:
+#   rina-run <hf_model_or_path> [options]
+#   rina-run meta-llama/Llama-3.2-1B-Instruct --prompt "Hello" --steps 20
+#
+# Options:
+#   --prompt TEXT    Input prompt (default: "Hello")
+#   --steps N        Number of tokens to generate (default: 20)
+#   --temp T         Temperature (default: 0 = greedy)
+#   --topk K         Top-k sampling (default: 40)
+#   --topp P         Top-p sampling (default: 0.9)
+#   --seed S         Random seed
+#   --bf16           Use bf16 intermediates
+#   --qbits N        Quantization bits (4 or 32, default: 4)
+#
+set -e
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BUILD_DIR="$(cd "$SCRIPT_DIR/../build" && pwd)"
+RINA_INFER="$BUILD_DIR/rina_infer"
+
+# Defaults
+PROMPT="Hello"
+STEPS=20
+TEMP=0
+TOPK=40
+TOPP=0.9
+REP=1.0
+SEED=0
+BF16=""
+QBITS=""
+
+# Parse args: first positional is model
+MODEL=""
+ARGS=()
+for arg in "$@"; do
+    if [[ "$arg" == --* ]]; then
+        ARGS+=("$arg")
+    elif [[ -z "$MODEL" ]]; then
+        MODEL="$arg"
+    fi
+done
+
+# Re-parse properly
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --prompt) PROMPT="$2"; shift 2 ;;
+        --steps) STEPS="$2"; shift 2 ;;
+        --temp) TEMP="$2"; shift 2 ;;
+        --topk) TOPK="$2"; shift 2 ;;
+        --topp) TOPP="$2"; shift 2 ;;
+        --rep) REP="$2"; shift 2 ;;
+        --seed) SEED="$2"; shift 2 ;;
+        --bf16) BF16="--bf16"; shift ;;
+        --qbits) QBITS="$2"; shift 2 ;;
+        -*)
+            if [[ -z "$MODEL" && "$1" != --* ]]; then MODEL="$1"; fi
+            shift ;;
+        *) 
+            if [[ -z "$MODEL" ]]; then MODEL="$1"; fi
+            shift ;;
+    esac
+done
+
+if [[ -z "$MODEL" ]]; then
+    echo "Usage: rina-run <hf_model_or_path> [options]"
+    echo ""
+    echo "Examples:"
+    echo "  rina-run meta-llama/Llama-3.2-1B-Instruct --prompt 'Hello'"
+    echo "  rina-run /path/to/model/dir --prompt 'Hi' --steps 50 --temp 0.7"
+    exit 1
+fi
+
+# Check if local path or HF hub name
+if [[ -d "$MODEL" ]]; then
+    MODEL_PATH="$MODEL"
+elif [[ -f "$(echo ~/.cache/huggingface/hub/models--$(echo $MODEL | tr / --)/snapshots/*/config.json 2>/dev/null | head -1)" ]]; then
+    # Find in HF cache
+    CACHE_BASE="$HOME/.cache/huggingface/hub/models--$(echo $MODEL | tr / --)/snapshots"
+    MODEL_PATH=$(ls -d "$CACHE_BASE"/*/ 2>/dev/null | head -1)
+    if [[ -z "$MODEL_PATH" ]]; then
+        echo "Model not found in HF cache. Try: huggingface-cli download $MODEL" >&2
+        exit 1
+    fi
+else
+    echo "Model path not found: $MODEL" >&2
+    echo "Try downloading first: huggingface-cli download $MODEL" >&2
+    exit 1
+fi
+
+echo "RINA Inference" >&2
+echo "  Model: $MODEL_PATH" >&2
+echo "  Prompt: \"$PROMPT\"" >&2
+echo "  Steps: $STEPS | Temp: $TEMP | BF16: ${BF16:-no}" >&2
+echo "" >&2
+
+export LD_LIBRARY_PATH="/home/aquama/miniconda3/envs/natalia/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec "$RINA_INFER" --model "$MODEL_PATH" \
+    --prompt "$PROMPT" \
+    --steps "$STEPS" \
+    --temp "$TEMP" \
+    --topk "$TOPK" \
+    --topp "$TOPP" \
+    --rep "$REP" \
+    --seed "$SEED" \
+    $BF16

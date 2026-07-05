@@ -22,6 +22,10 @@ paper/
 *.pdb
 *.log
 
+# Build outputs
+build/
+rina-engine/build/
+
 # Editors
 .vscode/
 .kilo/

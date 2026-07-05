@@ -11,6 +11,7 @@
 
 extern void launch_embedding_fp32(const float*,const int*,float*,int,int,int,cudaStream_t);
 extern void launch_linear_fp32(const float*,const float*,float*,int,int,int,cudaStream_t);
+extern void launch_linear_dispatch(const void*,QuantType,const float*,float*,int,int,int,cudaStream_t);
 
 int main(int argc, char** argv) {
     if (argc < 3) { fprintf(stderr,"Usage: align_llama model.rinn \"id1 id2 ...\" [out.bin]\n"); return 1; }
@@ -64,15 +65,19 @@ int main(int argc, char** argv) {
     if (e != cudaSuccess) { fprintf(stderr,"forward: %s\n", cudaGetErrorString(e)); return 1; }
     fprintf(stderr,"forward OK\n");
 
-    // LM head (inference uses LayerNorm for final norm; Llama uses RMSNorm)
+    // LM head
     auto* ln_f = w.get("transformer.ln_f.weight");
     if (ln_f) {
         extern void launch_rms_norm_fp32(float*, const float*, int, int, float, cudaStream_t);
         launch_rms_norm_fp32(bufs.fwd.h, (const float*)ln_f->data, n, d, 1e-5f, s);
     }
 
-    const float* lm_w = (const float*)w.get("lm_head.weight")->data;
-    launch_linear_fp32(bufs.fwd.h, lm_w, bufs.fwd.lm, n, V, d, s);
+    auto* lm_t = w.get("lm_head.weight");
+    if (lm_t) {
+        launch_linear_dispatch(lm_t->data, lm_t->quant_type, bufs.fwd.h, bufs.fwd.lm, n, V, d, s);
+    } else {
+        launch_linear_fp32(bufs.fwd.h, wte, bufs.fwd.lm, n, V, d, s);
+    }
     cudaStreamSynchronize(s);
     if (cudaGetLastError() != cudaSuccess) { fprintf(stderr,"lm_head fail\n"); return 1; }
 

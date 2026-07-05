@@ -10,6 +10,7 @@ extern void launch_embedding_fp32(const float*,const int*,float*,int,int,int,cud
 extern void launch_rms_norm_fp32(float*,const float*,int,int,float,cudaStream_t);
 extern "C" void launch_pytorch_ln_kernel(float*,const float*,int,int,float,cudaStream_t);
 extern void launch_linear_fp32(const float*,const float*,float*,int,int,int,cudaStream_t);
+extern void launch_linear_dispatch(const void*,QuantType,const float*,float*,int,int,int,cudaStream_t);
 extern float launch_crossentropy_fp32(const float*,const int*,float*,int,int,cudaStream_t);
 extern void launch_adamw_fp32(float*,const float*,float*,float*,int,float,float,float,float,float,float,float,cudaStream_t);
 extern void launch_layernorm_bwd_fp32(const float*,const float*,const float*,float*,float*,int,int,cudaStream_t);
@@ -61,11 +62,12 @@ float model_train_v2(const ModelConfig& cfg, const TensorMap& w,
             launch_pytorch_ln_kernel(h, (const float*)ln_f_w->data, n, d, 1e-5f, stream);
     }
 
-    const float* lm_w = nullptr;
     auto* lm_t = w.get("lm_head.weight");
-    if (lm_t) lm_w = (const float*)lm_t->data;
-    if (!lm_w) lm_w = wte;
-    launch_linear_fp32(h, lm_w, bufs.fwd.lm, n, V, d, stream);
+    if (lm_t) {
+        launch_linear_dispatch(lm_t->data, lm_t->quant_type, h, bufs.fwd.lm, n, V, d, stream);
+    } else {
+        launch_linear_fp32(h, wte, bufs.fwd.lm, n, V, d, stream);
+    }
     float loss_val = launch_crossentropy_fp32(bufs.fwd.lm, targets, dlm_, n, V, stream);
 
     // ═══════ BACKWARD ═══════
@@ -79,8 +81,10 @@ float model_train_v2(const ModelConfig& cfg, const TensorMap& w,
     float a1 = 1.0f, b0 = 0.0f, b1 = 1.0f;
 
     // lm_head backward
+    auto* lm_bw_t = w.get("lm_head.weight");
+    const float* lm_bw = lm_bw_t ? (const float*)lm_bw_t->data : wte;
     cublasSgemm(ch, CUBLAS_OP_N, CUBLAS_OP_N,
-                d, n, V, &a1, lm_w, d, dlm_, V, &b1, dh_, d);
+                d, n, V, &a1, lm_bw, d, dlm_, V, &b1, dh_, d);
     // ln_f backward
     if (ln_f_w) {
         launch_layernorm_bwd_fp32(dh_, lnx, (const float*)ln_f_w->data, dh_, 0, n, d, stream);

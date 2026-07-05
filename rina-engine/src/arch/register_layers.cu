@@ -4,6 +4,7 @@
 
 // Forward declarations for per-arch creation
 Layer create_gqa_layer();
+Layer create_gqa_bf16_layer();
 Layer create_rina_ssm_layer();
 Layer create_rina_mla_layer();
 
@@ -11,6 +12,8 @@ Layer* create_layer_by_type(const std::string& type) {
     Layer* l = new Layer();
     if (type == "standard_gqa" || type == "standard_attention" || type == "gqa") {
         *l = create_gqa_layer();
+    } else if (type == "gqa_bf16") {
+        *l = create_gqa_bf16_layer();
     } else if (type == "inertia_wave_ssm" || type == "ssm") {
         *l = create_rina_ssm_layer();
     } else if (type == "sparse_gather_fa" || type == "mla") {

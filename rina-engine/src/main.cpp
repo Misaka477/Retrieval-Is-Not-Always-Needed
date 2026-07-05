@@ -7,6 +7,7 @@
 #include <random>
 #include <string>
 #include <vector>
+#include <sys/stat.h>
 #include "core/config.h"
 #include "core/tensor.h"
 #include "core/tokenizer.h"
@@ -91,6 +92,11 @@ int main(int argc, char** argv) {
     int topk = 40;
     bool greedy = true;
     bool use_pytorch = false;
+    bool use_bf16 = false;
+    bool use_gguf = false;
+    std::string kv_quant_mode = "fp32";
+    bool pre_rope = false;
+    struct stat st;
     struct { bool embed=false,ln=false,attn=false,cproj=false,mlp=false; } custom;
 
     for (int i = 1; i < argc; i++) {
@@ -126,6 +132,14 @@ int main(int argc, char** argv) {
         else if (strcmp(argv[i], "--topp") == 0) topp = atof(argv[++i]);
         else if (strcmp(argv[i], "--rep") == 0) rep = atof(argv[++i]);
         else if (strcmp(argv[i], "--seed") == 0) seed = (unsigned int)atoi(argv[++i]);
+        else if (strcmp(argv[i], "--bf16") == 0) use_bf16 = true;
+        else if (strcmp(argv[i], "--qbits") == 0) { if(i+1<argc) i++; }
+        else if (strcmp(argv[i], "--gguf") == 0) use_gguf = true;
+        else if (strcmp(argv[i], "--kv-quant") == 0) {
+            if (i + 1 < argc && argv[i + 1][0] != '-') kv_quant_mode = argv[++i];
+            else kv_quant_mode = "q2k_q1v";
+        }
+        else if (strcmp(argv[i], "--pre-rope") == 0) pre_rope = true;
     }
     if (seed) rng.seed(seed);
 
@@ -133,8 +147,36 @@ int main(int argc, char** argv) {
 
     ModelConfig cfg;
     TensorMap weights;
-    if (!load_model(model_path, cfg, weights)) {
-        fprintf(stderr, "Failed to load model: %s\n", model_path); return 1;
+
+    bool is_hf = false;
+    cfg.kv_quant_mode = kv_quant_mode;
+    cfg.use_pre_rope_k = pre_rope;
+    if (kv_quant_mode != "fp32")
+        fprintf(stderr, "  kv-quant: %s\n", kv_quant_mode.c_str());
+    if (use_gguf) {
+        fprintf(stderr, "Loading GGUF model: %s\n", model_path);
+        if (!load_gguf_model(model_path, cfg, weights)) {
+            fprintf(stderr, "Failed to load GGUF model: %s\n", model_path); return 1;
+        }
+    } else {
+        // Auto-detect: HF directory (has config.json) vs .rinn file/directory
+        if (::stat(model_path, &st) == 0) {
+            if (S_ISDIR(st.st_mode)) {
+                std::string cfg_path = std::string(model_path) + "/config.json";
+                is_hf = (::stat(cfg_path.c_str(), &st) == 0);
+            }
+        }
+
+        if (is_hf) {
+            fprintf(stderr, "Loading HF model: %s\n", model_path);
+            if (!load_hf_model(model_path, cfg, weights, 4)) {
+                fprintf(stderr, "Failed to load HF model: %s\n", model_path); return 1;
+            }
+        } else {
+            if (!load_model(model_path, cfg, weights)) {
+                fprintf(stderr, "Failed to load model: %s\n", model_path); return 1;
+            }
+        }
     }
 
     fprintf(stderr, "Model: %s (%d layers, dim=%d, vocab=%d) %s\n",
@@ -166,20 +208,24 @@ int main(int argc, char** argv) {
     cudaMemcpyAsync(d_ids, prompt.data(), prompt.size() * sizeof(int), cudaMemcpyHostToDevice, s);
     cudaStreamSynchronize(s);
 
+    // Use KV cache: first call processes all prompt tokens, then process one new token at a time
     std::vector<int> gen = prompt;
     for (int step = 0; step < steps; step++) {
+        int T = (step == 0) ? (int)gen.size() : 1;
+        int start_pos = (step == 0) ? 0 : (int)gen.size() - 1;
 #ifdef RINA_WITH_PYTORCH
         if (use_pytorch) {
             pt_forward(d_ids, d_logits, 1, gen.size(), s);
         } else
 #endif
         {
-            model_forward_direct(cfg, weights, d_ids, d_logits, 1, gen.size(), s);
+            if (step == 0 && use_bf16) cfg.use_bf16 = true;
+            model_forward_direct(cfg, weights, d_ids + start_pos, d_logits, 1, T, s, start_pos);
         }
         cudaStreamSynchronize(s);
 
         std::vector<float> cpu(cfg.vocab_size);
-        cudaMemcpy(cpu.data(), d_logits + (gen.size() - 1) * cfg.vocab_size,
+        cudaMemcpy(cpu.data(), d_logits + (T - 1) * cfg.vocab_size,
                    cfg.vocab_size * sizeof(float), cudaMemcpyDeviceToHost);
 
         int next = sample(cpu.data(), cfg.vocab_size, temp, topk, topp, rep, gen, greedy);
@@ -188,9 +234,14 @@ int main(int argc, char** argv) {
         cudaStreamSynchronize(s);
     }
 
-    for (size_t i = prompt.size(); i < gen.size(); i++)
-        printf("%s%d", i==prompt.size()?"":" ", gen[i]);
-    printf("\n");
+    std::vector<int> gen_only(gen.begin() + prompt.size(), gen.end());
+    if(rinn.tokenizer.vocab_size() > 0) {
+        printf("%s\n", rinn.tokenizer.decode(gen_only).c_str());
+    } else {
+        printf("tokens:");
+        for(auto id: gen_only) printf(" %d", id);
+        printf("\n");
+    }
 
     weights.free_all();
 #ifdef RINA_WITH_PYTORCH

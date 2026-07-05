@@ -7,11 +7,14 @@ extern void launch_embedding_fp32(const float*,const int*,float*,int,int,int,cud
 extern void launch_rms_norm_fp32(float*,const float*,int,int,float,cudaStream_t);
 extern "C" void launch_pytorch_ln_kernel(float*,const float*,int,int,float,cudaStream_t);
 extern void launch_linear_fp32(const float*,const float*,float*,int,int,int,cudaStream_t);
+extern void launch_linear_dispatch(const void*,QuantType,const float*,float*,int,int,int,cudaStream_t);
 
 ModelContext g_ctx;
 
 void model_forward_v2(const ModelConfig& cfg, const TensorMap& w,
-    const int* ids, float* logits, int B, int T, cudaStream_t stream) {
+    const int* ids, float* logits, int B, int T, cudaStream_t stream,
+    int start_pos) {
+    (void)start_pos;
     int n = B * T, d = cfg.dim, V = cfg.vocab_size;
     auto* w1_0 = w.get("transformer.h.0.mlp.w1.weight");
     int hd = (w1_0 && w1_0->n_dim >= 2) ? w1_0->shape[0] : (d * 4 * 2 / 3 / 256 * 256);
@@ -42,11 +45,12 @@ void model_forward_v2(const ModelConfig& cfg, const TensorMap& w,
             launch_pytorch_ln_kernel(h, (const float*)ln_f_w->data, n, d, 1e-5f, stream);
     }}
 
-    const float* lm_w = nullptr;
     auto* lm_t = w.get("lm_head.weight");
-    if (lm_t) lm_w = (const float*)lm_t->data;
-    if (!lm_w) lm_w = wte;
-    launch_linear_fp32(h, lm_w, bufs.fwd.lm, n, V, d, stream);
+    if (lm_t) {
+        launch_linear_dispatch(lm_t->data, lm_t->quant_type, h, bufs.fwd.lm, n, V, d, stream);
+    } else {
+        launch_linear_fp32(h, wte, bufs.fwd.lm, n, V, d, stream);
+    }
 
     cudaMemcpyAsync(logits, bufs.fwd.lm, n * V * sizeof(float), cudaMemcpyDeviceToDevice, stream);
 }

@@ -41,6 +41,9 @@ struct ModelConfig {
     // quantization
     std::string quant_mode;  // "q2k_q1v", "q4k_q2v"
     int ssm_qbits;
+    bool use_bf16 = false;
+    std::string kv_quant_mode = "fp32";
+    bool use_pre_rope_k = false;  // cache pre-RoPE K instead of post-RoPE
 
     // layers
     std::vector<LayerConfig> layers;

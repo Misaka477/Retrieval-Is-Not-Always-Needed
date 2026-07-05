@@ -10,6 +10,7 @@
 extern void launch_embedding_fp32(const float*,const int*,float*,int,int,int,cudaStream_t);
 extern "C" void launch_pytorch_ln_kernel(float*,const float*,int,int,float,cudaStream_t);
 extern void launch_linear_fp32(const float*,const float*,float*,int,int,int,cudaStream_t);
+extern void launch_linear_dispatch(const void*,QuantType,const float*,float*,int,int,int,cudaStream_t);
 int main() {
     ModelConfig cfg; TensorMap w;
     if(!load_model("/tmp/llama3.2-1b.rinn",cfg,w)){fprintf(stderr,"load fail\n");return 1;}
@@ -58,9 +59,12 @@ int main() {
 
     auto*ln_f=w.get("transformer.ln_f.weight");
     if(ln_f)launch_pytorch_ln_kernel(bufs.fwd.h,(const float*)ln_f->data,n,d,1e-5f,s);
-    if(!w.get("lm_head.weight"))wte=(const float*)w.get("transformer.wte.weight")->data;
-    else wte=(const float*)w.get("lm_head.weight")->data;
-    launch_linear_fp32(bufs.fwd.h,wte,bufs.fwd.lm,n,V,d,s);
+    auto*lm_t=w.get("lm_head.weight");
+    if(lm_t) {
+        launch_linear_dispatch(lm_t->data,lm_t->quant_type,bufs.fwd.h,bufs.fwd.lm,n,V,d,s);
+    } else {
+        launch_linear_fp32(bufs.fwd.h,wte,bufs.fwd.lm,n,V,d,s);
+    }
     cudaStreamSynchronize(s);
     cudaError_t e=cudaGetLastError();
     fprintf(stderr,"lm_head: %s\n",cudaGetErrorString(e));

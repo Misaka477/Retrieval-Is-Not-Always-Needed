@@ -13,7 +13,7 @@ extern void launch_ssm_agg_fp32(const float*, const float*, const float*,
     int, int, int, cudaStream_t);
 extern void launch_ssm_scan_fp32(const float*, const float*, float*,
     int, int, int, int, cudaStream_t);
-extern void launch_rope_fp32(float*, const float*, const float*, int, int, int, int, cudaStream_t);
+extern void launch_rope_fp32(float*, const float*, const float*, int, int, int, int, cudaStream_t, int start_pos = 0);
 extern void build_qkv_fp32_kernel(const float*, const float*, const float*,
     const float*, const float*, float*, float*, float*,
     int, int, int, int, int, int, int, cudaStream_t);

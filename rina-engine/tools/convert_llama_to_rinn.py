@@ -1,6 +1,20 @@
 #!/usr/bin/env python3
 import struct, json, math, torch, numpy as np, sys, os
 from safetensors import safe_open
+sys.path.insert(0, os.path.dirname(__file__))
+from q4_pack import pack_q4_0, pack_q4_0_f, q4_0_storage_size, q4_0f_storage_size
+
+_NON_QAT = ('input_layernorm', 'post_attention_layernorm', 'norm', 'ln1', 'ln2', 'ln_f')
+
+def is_qat_key(key):
+    if 'embed_tokens' in key or 'lm_head' in key or 'wte' in key:
+        return False
+    for skip in _NON_QAT:
+        if skip in key:
+            return False
+    if '.weight' in key or '.bias' in key:
+        return True
+    return False
 
 def make_rope(dim, max_pos, theta=500000.0, scaling=None, device="cuda"):
     inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, device=device).float() / dim))
@@ -19,7 +33,7 @@ def make_rope(dim, max_pos, theta=500000.0, scaling=None, device="cuda"):
     eps = torch.outer(t, inv_freq)
     return eps.cos().contiguous(), eps.sin().contiguous()
 
-def convert(ckpt_dir, output_path, max_seq=512):
+def convert(ckpt_dir, output_path, max_seq=512, qbits=32, q4f=False):
     cfg_path = os.path.join(ckpt_dir, "config.json")
     with open(cfg_path) as f: hf_cfg = json.load(f)
     d = hf_cfg["hidden_size"]; n_layers = hf_cfg["num_hidden_layers"]
@@ -40,12 +54,26 @@ def convert(ckpt_dir, output_path, max_seq=512):
     cos, sin = make_rope(head_dim, max_seq, rope_t, rope_s, "cuda")
     ckpt = os.path.join(ckpt_dir, "model.safetensors")
     print(f"Opening {ckpt}...")
+    print(f"Quantization: {'q4_0' if qbits == 4 else 'fp32'}")
     with safe_open(ckpt, framework="pt", device="cpu") as st:
         tensors = []
         def add(n, arr):
-            b = arr.numpy().astype(np.float32).tobytes()
-            s = list(arr.shape) + [0]*(4-arr.ndim)
-            tensors.append({"name": n, "shape": s, "size": len(b), "data": b})
+            is_q4 = (is_qat_key(n) and (qbits == 4 or qbits == '4f'))
+            is_q4f = (q4f and is_q4)
+            s = list(arr.shape) + [0] * (4 - arr.ndim)
+            if is_q4:
+                packer = pack_q4_0_f if is_q4f else pack_q4_0
+                packed = packer(arr)
+                size = q4_0f_storage_size if is_q4f else q4_0_storage_size
+                size = size(int(np.prod(arr.shape)))
+                assert len(packed) == size
+                qt = 7 if is_q4f else 5
+                tensors.append({"name": n, "shape": s, "quant_type": qt, "block_size": 32,
+                                "size": size, "data": packed})
+            else:
+                b = arr.numpy().astype(np.float32).tobytes()
+                tensors.append({"name": n, "shape": s, "quant_type": 6, "block_size": 1,
+                                "size": len(b), "data": b})
         for l in range(n_layers):
             if l % 4 == 0: print(f"  layer {l}/{n_layers}...")
             add(f"transformer.h.{l}.attn.rope_q.cos", cos.cpu())
@@ -63,13 +91,16 @@ def convert(ckpt_dir, output_path, max_seq=512):
         wte = st.get_tensor("model.embed_tokens.weight").float()
         add("transformer.wte.weight", wte)
         add("transformer.ln_f.weight", st.get_tensor("model.norm.weight").float())
-        add("lm_head.weight", wte)
-    ies = lambda n: 2 + len(n.encode()) + 4*4 + 1 + 2 + 8 + 8
-    idx_sz = sum(ies(t["name"]) for t in tensors)
+        # lm_head.weight is weight-tied with wte; engine falls back to wte when missing
+        # add("lm_head.weight", wte)
+
+    idx_entry_size = lambda n: 2 + len(n.encode()) + 4*4 + 1 + 2 + 8 + 8
+    idx_sz = sum(idx_entry_size(t["name"]) for t in tensors)
     data_off = ((512 + len(cj) + idx_sz + 255) // 256) * 256
     off = data_off
     for t in tensors: t["offset"] = off; off += t["size"]
-    print(f"Writing {output_path} ({len(tensors)} tensors, {off/1024/1024:.0f} MB)...")
+    total_mb = off / 1024 / 1024
+    print(f"Writing {output_path} ({len(tensors)} tensors, {total_mb:.0f} MB)...")
     with open(output_path, "wb") as f:
         hdr = bytearray(512)
         hdr[0:4] = b"RINN"; struct.pack_into("<I", hdr, 4, 1)
@@ -84,7 +115,8 @@ def convert(ckpt_dir, output_path, max_seq=512):
             nb = t["name"].encode()
             f.write(struct.pack("<H", len(nb))); f.write(nb)
             for d_ in range(4): f.write(struct.pack("<i", t["shape"][d_]))
-            f.write(struct.pack("<B", 6)); f.write(struct.pack("<H", 1))
+            f.write(struct.pack("<B", t["quant_type"]))
+            f.write(struct.pack("<H", t["block_size"]))
             f.write(struct.pack("<Q", t["offset"])); f.write(struct.pack("<Q", t["size"]))
         pad = data_off - f.tell()
         if pad > 0: f.write(b"\x00" * pad)
@@ -95,4 +127,9 @@ if __name__ == "__main__":
     ckpt = sys.argv[1] if len(sys.argv) > 1 else \
         "/home/aquama/Development/RINA_Project/models/teacher/LLM-Research/Llama-3___2-1B-Instruct"
     out = sys.argv[2] if len(sys.argv) > 2 else "/tmp/llama3.2-1b.rinn"
-    convert(ckpt, out)
+    qbits = 32
+    for i, a in enumerate(sys.argv):
+        if a == "--qbits" and i + 1 < len(sys.argv):
+            v = sys.argv[i + 1]
+            qbits = int(v) if v.isdigit() else v
+    convert(ckpt, out, qbits=qbits, q4f=(qbits == '4f'))

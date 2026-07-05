@@ -121,6 +121,13 @@ static std::string read_config(const char* path_in, ModelConfig& cfg, TensorMap&
             fread(buf.data(), 1, bytes, f2);
             cudaMalloc(&wt.data, bytes);
             cudaMemcpy(wt.data, buf.data(), bytes, cudaMemcpyHostToDevice);
+        } else if (wt.quant_type == QuantType::Q4_0 || wt.quant_type == QuantType::Q4_0F) {
+            size_t bytes = quantized_size(wt.n_elems, wt.quant_type);
+            std::vector<uint8_t> buf(bytes);
+            fseek(f2, ts.offset, SEEK_SET);
+            fread(buf.data(), 1, bytes, f2);
+            cudaMalloc(&wt.data, bytes);
+            cudaMemcpy(wt.data, buf.data(), bytes, cudaMemcpyHostToDevice);
         } else {
             fprintf(stderr, "Unsupported quant_type %d for %s\n", (int)wt.quant_type, ts.name.c_str());
         }

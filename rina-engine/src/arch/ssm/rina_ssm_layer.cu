@@ -8,6 +8,7 @@
 #include <string>
 
 extern void launch_linear_fp32(const float*, const float*, float*, int, int, int, cudaStream_t);
+extern void launch_linear_dispatch(const void*, QuantType, const float*, float*, int, int, int, cudaStream_t);
 extern "C" void launch_pytorch_ln_kernel(float*, const float*, int, int, float, cudaStream_t);
 extern void launch_sigmoid_fp32(float*, int, cudaStream_t);
 extern void launch_ssm_agg_fp32(const float*, const float*, const float*,
@@ -52,8 +53,9 @@ static size_t wg_offset_of(const TensorMap& w, const std::string& name) {
 
 struct RinaSSMImpl {
     int d, H, Hkv, dh, dc, hd, ssm_steps;
-    const float *w_dq, *q_norm_w, *w_mem[3], *w_decay[3], *w_out;
-    const float *w1, *w2, *w3, *ln1_w, *ln2_w;
+    const float *q_norm_w, *ln1_w, *ln2_w;
+    WeightRef w_dq, w_mem[3], w_decay[3], w_out;
+    WeightRef w1, w2, w3;
     size_t off_dq, off_qn, off_mem[3], off_decay[3], off_out;
     size_t off_1, off_2, off_3, off_ln1, off_ln2;
     int off_ln1_out, off_cq, off_db, off_mems, off_ds, off_ln2_in, off_ln2_out, off_gu;
@@ -63,12 +65,14 @@ struct RinaSSMImpl {
         dc=cfg.d_c?cfg.d_c:160; ssm_steps=cfg.ssm_steps; hd=d*4*2/3/256*256;
         auto ld=[&](const std::string& name, const float*& ptr){
             auto*t=weights.get(name); if(!t)return false; ptr=(const float*)t->data; return true;};
-        ld(_tn(l,"path","w_dq.weight"),w_dq); ld(_tn(l,"path","q_norm.weight"),q_norm_w);
+        auto ld_ref=[&](const std::string& name, WeightRef& ref){
+            auto*t=weights.get(name); if(!t)return false; ref.data=t->data; ref.qt=t->quant_type; return true;};
+        ld_ref(_tn(l,"path","w_dq.weight"),w_dq); ld(_tn(l,"path","q_norm.weight"),q_norm_w);
         for(int k=0;k<ssm_steps;k++){
-            char b[128]; snprintf(b,128,"transformer.h.%d.path.w_mem.%d.weight",l,k); ld(b,w_mem[k]);
-            snprintf(b,128,"transformer.h.%d.path.w_decay.%d.weight",l,k); ld(b,w_decay[k]);}
-        ld(_tn(l,"path","w_out.weight"),w_out);
-        ld(_tn(l,"mlp","w1.weight"),w1); ld(_tn(l,"mlp","w2.weight"),w2); ld(_tn(l,"mlp","w3.weight"),w3);
+            char b[128]; snprintf(b,128,"transformer.h.%d.path.w_mem.%d.weight",l,k); ld_ref(b,w_mem[k]);
+            snprintf(b,128,"transformer.h.%d.path.w_decay.%d.weight",l,k); ld_ref(b,w_decay[k]);}
+        ld_ref(_tn(l,"path","w_out.weight"),w_out);
+        ld_ref(_tn(l,"mlp","w1.weight"),w1); ld_ref(_tn(l,"mlp","w2.weight"),w2); ld_ref(_tn(l,"mlp","w3.weight"),w3);
         ld(_tn(l,"ln1","weight"),ln1_w); ld(_tn(l,"ln2","weight"),ln2_w);
         off_dq=wg_offset_of(weights,_tn(l,"path","w_dq.weight")); off_qn=wg_offset_of(weights,_tn(l,"path","q_norm.weight"));
         for(int k=0;k<ssm_steps;k++){
@@ -88,12 +92,12 @@ struct RinaSSMImpl {
         cudaMemcpyAsync(bufs.save+off_ln1_out*n,h,n*d*sizeof(float),cudaMemcpyDeviceToDevice,stream);
         cudaMemcpyAsync(bufs.a,h,n*d*sizeof(float),cudaMemcpyDeviceToDevice,stream);
         launch_pytorch_ln_kernel(bufs.a,ln1_w,n,d,1e-5f,stream);
-        launch_linear_fp32(bufs.a,w_dq,bufs.m,n,dc,d,stream);
+        launch_linear_dispatch(w_dq.data,w_dq.qt,bufs.a,bufs.m,n,dc,d,stream);
         launch_pytorch_ln_kernel(bufs.m,q_norm_w,n,dc,1e-5f,stream);
         cudaMemcpyAsync(bufs.save+off_cq*n,bufs.m,n*dc*sizeof(float),cudaMemcpyDeviceToDevice,stream);
         for(int k=0;k<ssm_steps;k++){
-            launch_linear_fp32(bufs.m,w_mem[k],bufs.m+ncq+k*ms,n,H*dh,dc,stream);
-            launch_linear_fp32(bufs.m,w_decay[k],bufs.m+doff+k*n*H,n,H,dc,stream);
+            launch_linear_dispatch(w_mem[k].data,w_mem[k].qt,bufs.m,bufs.m+ncq+k*ms,n,H*dh,dc,stream);
+            launch_linear_dispatch(w_decay[k].data,w_decay[k].qt,bufs.m,bufs.m+doff+k*n*H,n,H,dc,stream);
             cudaMemcpyAsync(bufs.save+(off_db+k*H)*n,bufs.m+doff+k*n*H,n*H*sizeof(float),cudaMemcpyDeviceToDevice,stream);
             launch_sigmoid_fp32(bufs.m+doff+k*n*H,n*H,stream);}
         float* da=bufs.m+doff;
@@ -107,17 +111,17 @@ struct RinaSSMImpl {
             cudaMemcpyAsync(bufs.m+i*d2,bufs.a+i*d,d*sizeof(float),cudaMemcpyDeviceToDevice,stream);
             cudaMemcpyAsync(bufs.m+i*d2+d,ma+i*H*dh,H*dh*sizeof(float),cudaMemcpyDeviceToDevice,stream);
         }
-        launch_linear_fp32(bufs.m,w_out,bufs.a,n,d,d2,stream);
+        launch_linear_dispatch(w_out.data,w_out.qt,bufs.m,bufs.a,n,d,d2,stream);
         add_f32_s<<<(n*d+BLK-1)/BLK,BLK,0,stream>>>(h,h,bufs.a,n*d);
         cudaMemcpyAsync(bufs.save+off_ln2_in*n,h,n*d*sizeof(float),cudaMemcpyDeviceToDevice,stream);
         cudaMemcpyAsync(bufs.a,h,n*d*sizeof(float),cudaMemcpyDeviceToDevice,stream);
         launch_pytorch_ln_kernel(bufs.a,ln2_w,n,d,1e-5f,stream);
         cudaMemcpyAsync(bufs.save+off_ln2_out*n,bufs.a,n*d*sizeof(float),cudaMemcpyDeviceToDevice,stream);
-        launch_linear_fp32(bufs.a,w1,bufs.m,n,hd,d,stream);
-        launch_linear_fp32(bufs.a,w3,bufs.m+n*hd,n,hd,d,stream);
+        launch_linear_dispatch(w1.data,w1.qt,bufs.a,bufs.m,n,hd,d,stream);
+        launch_linear_dispatch(w3.data,w3.qt,bufs.a,bufs.m+n*hd,n,hd,d,stream);
         cudaMemcpyAsync(bufs.save+off_gu*n,bufs.m,2*n*hd*sizeof(float),cudaMemcpyDeviceToDevice,stream);
         silu_mul_f32_s<<<(n*hd+BLK-1)/BLK,BLK,0,stream>>>(bufs.m,bufs.m,bufs.m+n*hd,n*hd);
-        launch_linear_fp32(bufs.m,w2,bufs.a,n,d,hd,stream);
+        launch_linear_dispatch(w2.data,w2.qt,bufs.m,bufs.a,n,d,hd,stream);
         add_f32_s<<<(n*d+BLK-1)/BLK,BLK,0,stream>>>(h,h,bufs.a,n*d);
     }
 
@@ -132,12 +136,12 @@ struct RinaSSMImpl {
         // MLP bwd
         launch_copy_f32(grad.da,grad.dh,n*d,stream);
         launch_silu_mul_inline(grad.dm,sv_gu,sv_gu+n*hd,n*hd,stream);
-        cublasSgemm(ch,CUBLAS_OP_N,CUBLAS_OP_N,hd,n,d,&a1,w2,hd,grad.da,d,&b0,grad.dm,hd);
+        cublasSgemm(ch,CUBLAS_OP_N,CUBLAS_OP_N,hd,n,d,&a1,w2.f32(),hd,grad.da,d,&b0,grad.dm,hd);
         if(off_2!=(size_t)-1)cublasSgemm(ch,CUBLAS_OP_N,CUBLAS_OP_T,hd,d,n,&a1,grad.dm,hd,grad.da,d,&b1,wg+off_2,hd);
         launch_silu_mul_bwd_fp32(grad.dm,sv_gu,sv_gu+n*hd,grad.dm,grad.dm+n*hd,n*hd,stream);
-        cublasSgemm(ch,CUBLAS_OP_N,CUBLAS_OP_N,d,n,hd,&a1,w1,d,grad.dm,hd,&b1,grad.da,d);
+        cublasSgemm(ch,CUBLAS_OP_N,CUBLAS_OP_N,d,n,hd,&a1,w1.f32(),d,grad.dm,hd,&b1,grad.da,d);
         if(off_1!=(size_t)-1)cublasSgemm(ch,CUBLAS_OP_N,CUBLAS_OP_T,d,hd,n,&a1,sv_l2o,d,grad.dm,hd,&b1,wg+off_1,d);
-        cublasSgemm(ch,CUBLAS_OP_N,CUBLAS_OP_N,d,n,hd,&a1,w3,d,grad.dm+n*hd,hd,&b1,grad.da,d);
+        cublasSgemm(ch,CUBLAS_OP_N,CUBLAS_OP_N,d,n,hd,&a1,w3.f32(),d,grad.dm+n*hd,hd,&b1,grad.da,d);
         if(off_3!=(size_t)-1)cublasSgemm(ch,CUBLAS_OP_N,CUBLAS_OP_T,d,hd,n,&a1,sv_l2o,d,grad.dm+n*hd,hd,&b1,wg+off_3,d);
         launch_layernorm_bwd_fp32(grad.da,sv_l2i,ln2_w,grad.da,0,n,d,stream);
         add_f32_s<<<(n*d+BLK-1)/BLK,BLK,0,stream>>>(grad.dh,grad.dh,grad.da,n*d);
@@ -152,7 +156,7 @@ struct RinaSSMImpl {
         cudaMemcpyAsync(mem_save,mem_agg,n*H*dh*sizeof(float),cudaMemcpyDeviceToDevice,stream);
         launch_ssm_scan_fp32(mem_agg,dec_agg,mem_agg,B,T,H,dh,stream);
         cudaMemcpyAsync(grad.dm+n*d,mem_agg,n*H*dh*sizeof(float),cudaMemcpyDeviceToDevice,stream);
-        cublasSgemm(ch,CUBLAS_OP_N,CUBLAS_OP_N,d2,n,d,&a1,w_out,d2,grad.da,d,&b0,grad.dm+n*d2,d2);
+        cublasSgemm(ch,CUBLAS_OP_N,CUBLAS_OP_N,d2,n,d,&a1,w_out.f32(),d2,grad.da,d,&b0,grad.dm+n*d2,d2);
         if(off_out!=(size_t)-1)cublasSgemm(ch,CUBLAS_OP_N,CUBLAS_OP_T,d2,d,n,&a1,grad.dm,d2,grad.da,d,&b1,wg+off_out,d2);
         const float* d_sf=grad.dm+n*d2+n*d;
         float* d_mem=grad.dm+n*d2, *d_dec=d_mem+n*H*dh;
@@ -166,11 +170,11 @@ struct RinaSSMImpl {
         for(int k=0;k<ssm_steps;k++){
             launch_sigmoid_bwd_fp32(d_decs[k],sv_dr+k*n*H,n*H,stream);
             if(off_decay[k]!=(size_t)-1)cublasSgemm(ch,CUBLAS_OP_N,CUBLAS_OP_T,H,dc,n,&a1,d_decs[k],H,sv_cq,dc,&b1,wg+off_decay[k],H);
-            cublasSgemm(ch,CUBLAS_OP_N,CUBLAS_OP_N,dc,n,H,&a1,w_decay[k],dc,d_decs[k],H,&b1,d_cq,dc);
+            cublasSgemm(ch,CUBLAS_OP_N,CUBLAS_OP_N,dc,n,H,&a1,w_decay[k].f32(),dc,d_decs[k],H,&b1,d_cq,dc);
             if(off_mem[k]!=(size_t)-1)cublasSgemm(ch,CUBLAS_OP_N,CUBLAS_OP_T,H*dh,dc,n,&a1,d_mems[k],H*dh,sv_cq,dc,&b1,wg+off_mem[k],H*dh);
-            cublasSgemm(ch,CUBLAS_OP_N,CUBLAS_OP_N,dc,n,H*dh,&a1,w_mem[k],dc,d_mems[k],H*dh,&b1,d_cq,dc);}
+            cublasSgemm(ch,CUBLAS_OP_N,CUBLAS_OP_N,dc,n,H*dh,&a1,w_mem[k].f32(),dc,d_mems[k],H*dh,&b1,d_cq,dc);}
         launch_layernorm_bwd_fp32(d_cq,sv_cq,q_norm_w,d_cq,0,n,dc,stream);
-        cublasSgemm(ch,CUBLAS_OP_N,CUBLAS_OP_N,d,n,dc,&a1,w_dq,d,d_cq,dc,&b1,grad.da,d);
+        cublasSgemm(ch,CUBLAS_OP_N,CUBLAS_OP_N,d,n,dc,&a1,w_dq.f32(),d,d_cq,dc,&b1,grad.da,d);
         if(off_dq!=(size_t)-1)cublasSgemm(ch,CUBLAS_OP_N,CUBLAS_OP_T,dc,d,n,&a1,d_cq,dc,grad.da,d,&b1,wg+off_dq,dc);
         launch_layernorm_bwd_fp32(grad.da,sv_l1,ln1_w,grad.da,0,n,d,stream);
         add_f32_s<<<(n*d+BLK-1)/BLK,BLK,0,stream>>>(grad.dh,grad.dh,grad.da,n*d);

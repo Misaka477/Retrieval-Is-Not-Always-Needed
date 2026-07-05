@@ -8,7 +8,9 @@ from torch.nn import functional as F
 from rina.model_l3x import SparseIndexManager
 
 
-def ste_round(x): return x + (x.round() - x).detach()
+def ste_round(x):
+    sign = x.sign()
+    return x + (x.abs().add(0.5).floor() * sign - x).detach()
 
 
 def q4_0_block(x, gs=32):

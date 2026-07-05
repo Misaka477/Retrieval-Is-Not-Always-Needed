@@ -30,6 +30,7 @@ struct Tokenizer {
     std::string decode(const std::vector<int>& ids) const;
     std::vector<int> encode(const std::string& text) const;
     
+    int bos_id = -1;
     int vocab_size() const { return (int)id_to_token.size(); }
 };
 

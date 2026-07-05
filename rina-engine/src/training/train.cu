@@ -15,6 +15,10 @@ std::vector<std::unique_ptr<Layer>> build_layers(const ModelConfig& cfg, const T
             type = "inertia_wave_ssm";
         }
 
+        // Use gqa_bf16 if use_bf16 is set for standard attention
+        if (cfg.use_bf16 && (type == "standard_gqa" || type == "standard_attention" || type == "gqa"))
+            type = "gqa_bf16";
+
         auto layer = std::unique_ptr<Layer>(create_layer_by_type(type));
         if (!layer) {
             fprintf(stderr, "build_layers: unknown layer type '%s' at index %d\n", type.c_str(), l);
