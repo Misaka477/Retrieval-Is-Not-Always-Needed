@@ -197,8 +197,6 @@ experiments/               Data pipeline scripts
 archive/                   All legacy code (Gen1-Gen5, old experiments, gitignored)
 
 docs/                      Experiment logs & design docs
-
-paper/                     Paper draft
 ```
 
 ## Checkpoints
@@ -416,8 +414,6 @@ experiments/               数据管线脚本
 archive/                   全部历史代码（Gen1-Gen5、旧实验，gitignored）
 
 docs/                      实验记录与设计文档
-
-paper/                     论文初稿
 ```
 
 ## Checkpoint 文件
