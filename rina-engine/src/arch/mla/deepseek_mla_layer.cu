@@ -3,6 +3,8 @@
 #include "core/tensor.h"
 #include "core/quant.h"
 #include "core/buffer.h"
+#include "ops/saxpy.h"
+#include "ops/silu_mul.h"
 #include <cstdio>
 #include <cmath>
 #include <string>
@@ -16,84 +18,9 @@ extern void launch_rope_fp32(float*, const float*, const float*, int, int, int, 
 extern void launch_flash_attn_fp32(const float*, const float*, const float*, float*, int, int, int, int, int, cudaStream_t);
 extern void launch_flashattn_fwd_save_stats(const float*, const float*, const float*, float*, float*, float*, int, int, int, int, int, cudaStream_t);
 extern void launch_transpose_attn(float*, const float*, int, int, int, cudaStream_t);
-extern void launch_silu_mul_inline(float*, const float*, const float*, int, cudaStream_t);
 extern "C" void launch_pytorch_ln_kernel(float*, const float*, int, int, float, cudaStream_t);
 extern void build_qkv_fp32_kernel(const float*, const float*, const float*, const float*, const float*,
     float*, float*, float*, int, int, int, int, int, int, int, cudaStream_t);
-
-static const int BLK = 256;
-__global__ void add_f32_ds(float* c, const float* a, const float* b, int n) {
-    int i = blockIdx.x * BLK + threadIdx.x; if (i < n) c[i] = a[i] + b[i];
-}
-__global__ void silu_mul_f32_ds(float* o, const float* g, const float* u, int n) {
-    int i = blockIdx.x * BLK + threadIdx.x;
-    if (i < n) o[i] = (g[i] / (1.0f + expf(-g[i]))) * u[i];
-}
-
-__global__ void saxpy_k(float* d, const float* s, float p, int n) {
-    int i = blockIdx.x * BLK + threadIdx.x;
-    if (i < n) d[i] += p * s[i];
-}
-
-// Fused Q2_K vec×matmul: output[N] = input[K] @ weight[N,K]_Q2K
-// One block per output element, avoids materializing full fp32 weight
-// Q2_K layout: scales[16] + qs[64] + d[2] + dmin[2] = 84 bytes per 256 values
-// Dequant formula (from llama.cpp):
-//   y[l+0] = dall * scales[is+0] * q_bit0   - dmin * (scales[is+0] >> 4)
-//   y[l+32] = dall * scales[is+2] * q_bit2   - dmin * (scales[is+2] >> 4)
-//   y[l+64] = dall * scales[is+4] * q_bit4   - dmin * (scales[is+4] >> 4)
-//   y[l+96] = dall * scales[is+6] * q_bit6   - dmin * (scales[is+6] >> 4)
-// where n=tid/32, l=tid%32, is=8*n+l/16, q=x.qs[32*n+l]
-static inline __device__ float half_to_float_gpu(uint16_t h) {
-    return __half2float(__ushort_as_half(h));
-}
-__global__ void q2k_vec_mul_kernel(const float* __restrict__ input, const void* __restrict__ weight,
-    float* __restrict__ output, int N, int K) {
-    int n = blockIdx.x; if (n >= N) return;
-    int tid = threadIdx.x;
-    const uint8_t* w = (const uint8_t*)weight;
-    
-    float sum = 0.0f;
-    int elem_start = n * K;
-    
-    for (int i = tid; i < K; i += blockDim.x) {
-        int elem = elem_start + i;
-        int blk = elem / 256;
-        int in_blk = elem % 256;
-        
-        const uint8_t* blk_data = w + (size_t)blk * 84;
-        float dall = half_to_float_gpu(*(const uint16_t*)(blk_data + 80));
-        float dmin = half_to_float_gpu(*(const uint16_t*)(blk_data + 82));
-        
-        // Map element position to Q2_K layout
-        int page = in_blk / 128;         // 0 or 1
-        int pos = in_blk % 128;          // 0..127
-        int l = pos % 32;                // 0..31
-        int group_of_32 = pos / 32;      // 0, 1, 2, 3
-        int is = 8 * page + l / 16;      // scale index (0..15)
-        int scale_idx = is + group_of_32 * 2;  // which of the 4 scales
-        
-        uint8_t sc = blk_data[scale_idx];
-        float scale_val = dall * (sc & 0xF);
-        float min_val = dmin * (sc >> 4);
-        
-        int byte_idx = page * 32 + l;    // qs index
-        int shift = group_of_32 * 2;     // bit shift
-        int q = (blk_data[16 + byte_idx] >> shift) & 3;
-        
-        float deq = scale_val * q - min_val;
-        sum += input[i] * deq;
-    }
-    
-    __shared__ float sh[256];
-    sh[tid] = sum;
-    __syncthreads();
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) sh[tid] += sh[tid + s];
-        __syncthreads();
-    }
-    if (tid == 0) output[n] = sh[0];
-}
 
 __global__ void expand_kpe_kernel(const float* src, float* dst, int n, int H, int rope_dim) {
     int t = blockIdx.x;
@@ -342,7 +269,7 @@ struct DeepseekMLAImpl {
         }
 
         launch_linear_dispatch(w_o.data, w_o.qt, b.a, b.a, n, d, H * nope_dim, s);
-        add_f32_ds<<<(n*d + BLK - 1) / BLK, BLK, 0, s>>>(h, h, b.a, n*d);
+        launch_add(h, h, b.a, n*d, s);
 
         cudaMemcpyAsync(b.save + off_l2i * n, h, n * d * sizeof(float), cudaMemcpyDeviceToDevice, s);
         cudaMemcpyAsync(b.a, h, n * d * sizeof(float), cudaMemcpyDeviceToDevice, s);
@@ -355,9 +282,9 @@ struct DeepseekMLAImpl {
             launch_linear_dispatch(w1.data, w1.qt, b.a, b.m, n, hd, d, s);
             launch_linear_dispatch(w3.data, w3.qt, b.a, b.m + n * hd, n, hd, d, s);
             cudaMemcpyAsync(b.save + off_gu * n, b.m, 2 * n * hd * sizeof(float), cudaMemcpyDeviceToDevice, s);
-            silu_mul_f32_ds<<<(n * hd + BLK - 1) / BLK, BLK, 0, s>>>(b.m, b.m, b.m + n * hd, n * hd);
+            launch_silu_mul(b.m, b.m, b.m + n * hd, n * hd, s);
             launch_linear_dispatch(w2.data, w2.qt, b.m, b.a, n, d, hd, s);
-            add_f32_ds<<<(n * d + BLK - 1) / BLK, BLK, 0, s>>>(h, h, b.a, n * d);
+            launch_add(h, h, b.a, n * d, s);
         }
     }
 
@@ -365,16 +292,17 @@ struct DeepseekMLAImpl {
         float* shared_gate = b.m;
         float* shared_up = b.m + n * 2816;
         float* shared_out = b.m + n * (2816 + 2816);
+        float* h_ln = b.save + off_l2o * n;  // saved ln2 output for router
 
         launch_linear_dispatch(gate_shexp.data, gate_shexp.qt, b.a, shared_gate, n, 2816, d, s);
         launch_linear_dispatch(up_shexp.data, up_shexp.qt, b.a, shared_up, n, 2816, d, s);
-        silu_mul_f32_ds<<<(n * 2816 + BLK - 1) / BLK, BLK, 0, s>>>(shared_gate, shared_gate, shared_up, n * 2816);
+        launch_silu_mul(shared_gate, shared_gate, shared_up, n * 2816, s);
         launch_linear_dispatch(down_shexp.data, down_shexp.qt, shared_gate, shared_out, n, d, 2816, s);
         cudaMemcpyAsync(b.a, shared_out, n * d * sizeof(float), cudaMemcpyDeviceToDevice, s);
 
-        // Router: gate_inp @ h → [n, 64]
+        // Router: gate_inp @ h_ln → [n, 64] (use saved ln2 output, not shared output)
         float* router_logits = b.m;
-        launch_linear_dispatch(gate_inp.data, gate_inp.qt, b.a, router_logits, n, 64, d, s);
+        launch_linear_dispatch(gate_inp.data, gate_inp.qt, h_ln, router_logits, n, 64, d, s);
         cudaStreamSynchronize(s);
         std::vector<float> logits(n * 64);
         cudaMemcpy(logits.data(), router_logits, n * 64 * sizeof(float), cudaMemcpyDeviceToHost);
@@ -410,15 +338,15 @@ struct DeepseekMLAImpl {
                     b.save + off_l2o * n + t * d, eg, 1, 1408, d, s);
                 launch_linear_dispatch((const char*)up_exps.data + e * expert_stride_gu, up_exps.qt,
                     b.save + off_l2o * n + t * d, eu, 1, 1408, d, s);
-                silu_mul_f32_ds<<<1, 256, 0, s>>>(eg, eg, eu, 1408);
+                launch_silu_mul(eg, eg, eu, 1408, s);
 
                 launch_linear_dispatch((const char*)down_exps.data + e * expert_stride_dn, down_exps.qt,
                     eg, out_t, 1, d, 1408, s);
 
-                saxpy_k<<<(d + BLK - 1) / BLK, BLK, 0, s>>>(b.a + t * d, out_t, prob, d);
+                launch_saxpy(b.a + t * d, out_t, prob, d, s);
             }
         }
-        add_f32_ds<<<(n * d + BLK - 1) / BLK, BLK, 0, s>>>(h, h, b.a, n * d);
+        launch_add(h, h, b.a, n * d, s);
     }
 
     void backward(GradBuffers&, ForwardBuffers&, float*, int, int, cudaStream_t) {}

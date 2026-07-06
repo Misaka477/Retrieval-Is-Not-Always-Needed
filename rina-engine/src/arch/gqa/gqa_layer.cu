@@ -9,6 +9,8 @@
 #include <string>
 #include <cstring>
 
+#include "ops/saxpy.h"
+#include "ops/silu_mul.h"
 extern void launch_linear_fp32(const float*, const float*, float*, int, int, int, cudaStream_t);
 extern void launch_linear_dispatch(const void*, QuantType, const float*, float*, int, int, int, cudaStream_t);
 extern "C" void launch_pytorch_ln_kernel(float*, const float*, int, int, float, cudaStream_t);
@@ -53,14 +55,7 @@ extern void launch_add_bf16(__nv_bfloat16*, const __nv_bfloat16*, const __nv_bfl
 extern void launch_add_inplace_bf16(__nv_bfloat16*, const __nv_bfloat16*, int, cudaStream_t);
 extern void launch_silu_mul_bf16(__nv_bfloat16*, const __nv_bfloat16*, const __nv_bfloat16*, int, cudaStream_t);
 
-static const int BLK = 256;
-__global__ void add_f32_g(float* c, const float* a, const float* b, int n) {
-    int i = blockIdx.x * BLK + threadIdx.x; if (i < n) c[i] = a[i] + b[i];
-}
-__global__ void silu_mul_f32_g(float* o, const float* g, const float* u, int n) {
-    int i = blockIdx.x * BLK + threadIdx.x;
-    if (i < n) o[i] = (g[i] / (1.0f + expf(-g[i]))) * u[i];
-}
+
 
 static std::string _tn(int l, const char* c, const char* p) {
     char b[128]; snprintf(b, 128, "transformer.h.%d.%s.%s", l, c, p); return b;
@@ -275,7 +270,7 @@ struct GQAImpl {
         }
 
         launch_linear_dispatch(w_o.data, w_o.qt, bufs.a, bufs.a, n, d, hdh, stream);
-        add_f32_g<<<(n*d + BLK - 1) / BLK, BLK, 0, stream>>>(h, h, bufs.a, n*d);
+        launch_add(h, h, bufs.a, n*d, stream);
         cudaMemcpyAsync(bufs.a, h, n * d * sizeof(float), cudaMemcpyDeviceToDevice, stream);
         if (use_rms_norm) launch_rms_norm_fp32(bufs.a, ln2_w, n, d, 1e-5f, stream);
         else launch_pytorch_ln_kernel(bufs.a, ln2_w, n, d, 1e-5f, stream);
@@ -283,9 +278,9 @@ struct GQAImpl {
         launch_linear_dispatch(w1.data, w1.qt, bufs.a, bufs.m, n, hd, d, stream);
         launch_linear_dispatch(w3.data, w3.qt, bufs.a, bufs.m + n * hd, n, hd, d, stream);
         cudaMemcpyAsync(bufs.save + off_gu * n, bufs.m, 2 * n * hd * sizeof(float), cudaMemcpyDeviceToDevice, stream);
-        silu_mul_f32_g<<<(n * hd + BLK - 1) / BLK, BLK, 0, stream>>>(bufs.m, bufs.m, bufs.m + n * hd, n * hd);
+        launch_silu_mul(bufs.m, bufs.m, bufs.m + n * hd, n * hd, stream);
         launch_linear_dispatch(w2.data, w2.qt, bufs.m, bufs.a, n, d, hd, stream);
-        add_f32_g<<<(n * d + BLK - 1) / BLK, BLK, 0, stream>>>(h, h, bufs.a, n*d);
+        launch_add(h, h, bufs.a, n*d, stream);
     }
 
     // ─── bf16 forward path (RMSNorm in fp32, matmuls in bf16, no buffer aliasing) ───
@@ -396,7 +391,7 @@ struct GQAImpl {
         launch_linear_dispatch_bf16(w_o.data, w_o.qt, m_bf16 + hq_bf + hk_bf * 2,
                                     m_bf16, n, d, hdh_bf, stream);
         launch_bf16_to_fp32(m_bf16, bufs.a, n * d, stream);
-        add_f32_g<<<((size_t)n*d + BLK - 1) / BLK, BLK, 0, stream>>>(h, h, bufs.a, n * d);
+        launch_add(h, h, bufs.a, n * d, stream);
 
         // ── MLP path ──
         // RMSNorm2 in fp32
@@ -417,7 +412,7 @@ struct GQAImpl {
         launch_linear_dispatch_bf16(w2.data, w2.qt, m_bf16, a_bf16, n, d, hd, stream);
         // In-place bf16→fp32 of w2 output (safe: all bf16 reads complete before fp32 writes)
         launch_bf16_to_fp32(a_bf16, bufs.a, n * d, stream);
-        add_f32_g<<<((size_t)n*d + BLK - 1) / BLK, BLK, 0, stream>>>(h, h, bufs.a, n * d);
+        launch_add(h, h, bufs.a, n * d, stream);
     }
 
     void backward(GradBuffers& grad, ForwardBuffers& bufs, float* wg, int B, int T, cudaStream_t stream) {

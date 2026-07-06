@@ -31,6 +31,8 @@ struct WeightTensor {
 
 struct TensorMap {
     std::unordered_map<std::string, WeightTensor> tensors;
+    void* shared_buffer = nullptr;  // optional single-buffer allocation
+
     void add(const std::string& name, WeightTensor&& t) { tensors[name] = std::move(t); }
     const WeightTensor* get(const std::string& name) const {
         auto it = tensors.find(name); return it != tensors.end() ? &it->second : nullptr;
@@ -38,5 +40,13 @@ struct TensorMap {
     WeightTensor* get(const std::string& name) {
         auto it = tensors.find(name); return it != tensors.end() ? &it->second : nullptr;
     }
-    void free_all() { for (auto& [n, t] : tensors) t.free(); tensors.clear(); }
+    void free_all() {
+        if (shared_buffer) {
+            cudaFree(shared_buffer); shared_buffer = nullptr;
+            tensors.clear();
+            return;
+        }
+        for (auto& [n, t] : tensors) t.free();
+        tensors.clear();
+    }
 };

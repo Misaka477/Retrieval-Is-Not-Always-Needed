@@ -18,13 +18,18 @@ endif()
 
 set(RINA_SRC src/loader.cpp src/main.cpp src/core/layer.cpp src/core/buffer.cpp
     src/core/tape.cpp src/core/layers_fp32.cpp src/core/tokenizer.cpp
-    src/loader_hf.cpp src/loader_gguf.cpp)
+    src/loader_hf.cpp src/loader_gguf.cpp
+    src/loader/gguf_reader.cpp src/loader/loader_shared.cpp
+    src/loader/loader_gqa.cpp src/loader/loader_mla.cpp
+    src/infer/infer_shared.cpp src/infer/infer_gqa.cpp src/infer/infer_mla.cpp)
 if(EXISTS ${TORCH_ROOT})
     list(APPEND RINA_SRC src/model_pytorch.cpp)
 endif()
 
 set(RINA_CUDA_SRC
-    src/kernels/rope_fp32.cu src/kernels/rope_fp32_hf.cu src/kernels/embedding.cu src/kernels/pytorch_ln_kernel.cu
+    src/ops/linear.cu src/ops/rms_norm.cu src/ops/rope.cu
+    src/ops/embedding.cu src/ops/silu_mul.cu src/ops/saxpy.cu
+    src/kernels/rope_fp32.cu src/kernels/rope_fp32_hf.cu src/kernels/rope.cu src/kernels/embedding.cu src/kernels/pytorch_ln_kernel.cu
     src/kernels/rms_norm.cu src/kernels/build_qkv_fp32.cu src/kernels/flash_fp32.cu
     src/kernels/quantize.cu src/kernels/sparse_attn.cu src/kernels/linear_fp32.cu src/kernels/linear_q4.cu
     src/kernels/ssm_kernels_fp32.cu src/kernels/ssm_lsc_scan.cu src/kernels/activation_fp32.cu

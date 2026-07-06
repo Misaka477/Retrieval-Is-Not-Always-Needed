@@ -12,6 +12,7 @@
 #include "core/tensor.h"
 #include "core/tokenizer.h"
 #include "model.h"
+#include "infer/infer_base.h"
 
 #ifdef RINA_WITH_PYTORCH
 extern "C" void pt_init(const ModelConfig&, const TensorMap&, bool embed=false, bool ln=false,
@@ -225,8 +226,17 @@ int main(int argc, char** argv) {
         use_pytorch ? "[PyTorch ref]" : "[Custom engine]");
     
     // Load tokenizer from model directory (if available)
+    // For GGUF: look for tokenizer.json in same directory as the .gguf file
     RINNModel rinn;
-    rinn.load(model_path);
+    {
+        std::string tok_path = model_path;
+        if (use_gguf) {
+            // Try directory named after GGUF file (without .gguf extension)
+            auto dot = tok_path.rfind('.');
+            if (dot != std::string::npos) tok_path = tok_path.substr(0, dot);
+        }
+        rinn.load(tok_path.c_str());
+    }
     if(!g_prompt_text.empty()){
         if(rinn.tokenizer.vocab_size() > 0){
             prompt = rinn.tokenizer.encode(g_prompt_text);
@@ -250,6 +260,20 @@ int main(int argc, char** argv) {
     cudaMemcpyAsync(d_ids, prompt.data(), prompt.size() * sizeof(int), cudaMemcpyHostToDevice, s);
     cudaStreamSynchronize(s);
 
+    // Create inference engine
+    register_all_inferences();
+    std::string arch_name = "gqa";
+    if (!cfg.layers.empty()) {
+        auto& t0 = cfg.layers[0].type;
+        if (t0.find("deepseek") != std::string::npos) arch_name = "mla";
+    }
+    Inference* infer = create_inference(arch_name);
+    if (!infer || !infer->init(cfg, weights)) {
+        fprintf(stderr, "ERROR: failed to init %s inference\n", arch_name.c_str());
+        delete infer;
+        return 1;
+    }
+
     // Use KV cache: first call processes all prompt tokens, then process one new token at a time
     std::vector<int> gen = prompt;
     for (int step = 0; step < steps; step++) {
@@ -262,7 +286,7 @@ int main(int argc, char** argv) {
 #endif
         {
             if (step == 0 && use_bf16) cfg.use_bf16 = true;
-            model_forward_direct(cfg, weights, d_ids + start_pos, d_logits, 1, T, s, start_pos);
+            infer->forward(d_ids + start_pos, d_logits, 1, T, start_pos, s);
         }
         cudaStreamSynchronize(s);
 
@@ -275,6 +299,8 @@ int main(int argc, char** argv) {
         cudaMemcpyAsync(d_ids + gen.size() - 1, &next, sizeof(int), cudaMemcpyHostToDevice, s);
         cudaStreamSynchronize(s);
     }
+
+    delete infer;
 
     std::vector<int> gen_only(gen.begin() + prompt.size(), gen.end());
     if(rinn.tokenizer.vocab_size() > 0) {

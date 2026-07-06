@@ -16,6 +16,90 @@ static std::string read_file(const std::string& p) {
     std::stringstream ss; ss << f.rdbuf(); return ss.str();
 }
 
+// ── GPT-2 ByteLevel BPE bytes_to_unicode table ──
+// Builds the mapping: byte (0-255) → unicode character string
+// and reverse: unicode codepoint → byte
+// Matches GPT-2 / llama.cpp / transformers implementation
+static void build_byte_unicode_tables(Tokenizer* t) {
+    // bytes that map to themselves (printable ASCII + Latin-1 supplement)
+    std::vector<int> bs;
+    for (int i = 33; i <= 126; i++) bs.push_back(i);   // printable ASCII
+    for (int i = 161; i <= 172; i++) bs.push_back(i);  // Latin-1 supplement
+    for (int i = 174; i <= 255; i++) bs.push_back(i);  // Latin-1 supplement (cont)
+    
+    std::fill(t->unicode_to_byte, t->unicode_to_byte + 512, 0xFF);
+    
+    int n = 0;
+    for (int b = 0; b < 256; b++) {
+        auto it = std::find(bs.begin(), bs.end(), b);
+        if (it != bs.end()) {
+            // byte maps to itself
+            t->byte_to_unicode[b] = std::string(1, (char)b);
+            t->unicode_to_byte[b] = (uint8_t)b;
+        } else {
+            // byte maps to unicode at 256 + n
+            int codepoint = 256 + n;
+            n++;
+            // Encode codepoint to UTF-8
+            if (codepoint < 0x80) {
+                t->byte_to_unicode[b] = std::string(1, (char)codepoint);
+            } else if (codepoint < 0x800) {
+                t->byte_to_unicode[b] = {
+                    (char)(0xC0 | (codepoint >> 6)),
+                    (char)(0x80 | (codepoint & 0x3F))
+                };
+            } else {
+                t->byte_to_unicode[b] = {
+                    (char)(0xE0 | (codepoint >> 12)),
+                    (char)(0x80 | ((codepoint >> 6) & 0x3F)),
+                    (char)(0x80 | (codepoint & 0x3F))
+                };
+            }
+            t->unicode_to_byte[codepoint] = (uint8_t)b;
+        }
+    }
+}
+
+// Decode a single UTF-8 character from string at given position.
+// Returns the codepoint and advances pos past the encoded bytes.
+// Returns -1 on error.
+static int decode_utf8(const std::string& s, size_t& pos) {
+    if (pos >= s.size()) return -1;
+    unsigned char c0 = (unsigned char)s[pos];
+    if (c0 < 0x80) { pos++; return c0; }
+    if (c0 < 0xC0) { pos++; return -1; } // unexpected continuation byte
+    if (pos + 1 >= s.size()) { pos++; return -1; }
+    unsigned char c1 = (unsigned char)s[pos + 1];
+    if (c0 < 0xE0) { pos += 2; return ((c0 & 0x1F) << 6) | (c1 & 0x3F); }
+    if (pos + 2 >= s.size()) { pos += 2; return -1; }
+    unsigned char c2 = (unsigned char)s[pos + 2];
+    pos += 3;
+    return ((c0 & 0x0F) << 12) | ((c1 & 0x3F) << 6) | (c2 & 0x3F);
+}
+
+// ── Decode: convert token string back to text ──
+// GPT-2 BPE encodes bytes as unicode chars via bytes_to_unicode table.
+// Decode reverses this: map each unicode char back to its original byte.
+static std::string bbpe_decode(const Tokenizer* t, const std::string& token) {
+    std::string r;
+    size_t pos = 0;
+    while (pos < token.size()) {
+        size_t start = pos;
+        int cp = decode_utf8(token, pos);
+        if (cp < 0) {
+            r += token[start]; // bad UTF-8, pass through
+            continue;
+        }
+        if (cp < 512 && t->unicode_to_byte[cp] != 0xFF) {
+            r += (char)t->unicode_to_byte[cp];
+        } else {
+            // Not a mapped byte, append original UTF-8 bytes
+            r.append(token.data() + start, pos - start);
+        }
+    }
+    return r;
+}
+
 // ── load from tokenizer.json (HuggingFace BBPE format) ──
 
 static bool load_bbpe(Tokenizer* t, const std::string& json_path) {
@@ -71,6 +155,9 @@ static bool load_bbpe(Tokenizer* t, const std::string& json_path) {
         if(it != t->token_to_id.end()) t->bos_id = it->second;
     }
 
+    // Build bytes_to_unicode tables for GPT-2 BPE decode
+    build_byte_unicode_tables(t);
+
     t->type = TokenizerType::BBPE;
     fprintf(stderr,"tokenizer: BBPE loaded (vocab=%zu, merges=%zu, added=%zu)\n",
             t->id_to_token.size(), t->merges.size(),
@@ -95,27 +182,17 @@ bool Tokenizer::load_json(const std::string& path) {
 
 // ── decode ──
 
-static std::string unescape(const std::string& s) {
-    std::string r = s;
-    // BPE saves spaces as Ġ (U+0120). Replace with ASCII space.
-    for (size_t i = 0; i < r.size(); i++)
-        if ((unsigned char)r[i] == 0xC4 && i+1 < r.size() && (unsigned char)r[i+1] == 0xA0) {
-            r[i] = ' '; r.erase(i+1, 1);
-        }
-    return r;
-}
-
 std::string Tokenizer::decode(int id) const {
     auto it = id_to_token.find(id);
     if(it==id_to_token.end()) return "";
-    return unescape(it->second);
+    return bbpe_decode(this, it->second);
 }
 
 std::string Tokenizer::decode(const std::vector<int>& ids) const {
     std::string r;
     for(int id : ids){
         auto it = id_to_token.find(id);
-        if(it!=id_to_token.end()) r += unescape(it->second);
+        if(it!=id_to_token.end()) r += bbpe_decode(this, it->second);
     }
     return r;
 }
@@ -132,11 +209,15 @@ static int merge_rank(const std::vector<std::tuple<std::string,std::string,int>>
 std::vector<int> Tokenizer::encode(const std::string& text) const {
     if(id_to_token.empty() || merges.empty()) return {};
     
-    // Start with byte-level tokens
+    // Start with byte-level tokens via bytes_to_unicode mapping
     std::vector<std::string> tokens;
     for(unsigned char c : text){
-        std::string s(1, (char)c);
-        if(token_to_id.count(s)) tokens.push_back(s);
+        const std::string& mapped = byte_to_unicode[c];
+        if(token_to_id.count(mapped)) {
+            tokens.push_back(mapped);
+        } else if (!mapped.empty()) {
+            tokens.push_back(mapped); // still use it, will fail lookup later
+        }
     }
     
     // Greedy BPE merge

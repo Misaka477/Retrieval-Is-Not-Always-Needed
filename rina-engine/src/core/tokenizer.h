@@ -19,6 +19,9 @@ struct Tokenizer {
     
     // BBPE-specific
     std::vector<std::tuple<std::string, std::string, int>> merges; // (a, b, rank)
+    // GPT-2 ByteLevel BPE: byte → unicode char mapping for encode/decode
+    std::string byte_to_unicode[256];   // byte → unicode string
+    uint8_t unicode_to_byte[512];       // codepoint → byte (filled with 0xFF for unmapped)
     
     // SentencePiece-specific
     float byte_fallback = false;
