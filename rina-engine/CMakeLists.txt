@@ -29,12 +29,12 @@ endif()
 set(RINA_CUDA_SRC
     src/ops/linear.cu src/ops/rms_norm.cu src/ops/rope.cu
     src/ops/embedding.cu src/ops/silu_mul.cu src/ops/saxpy.cu
-    src/kernels/rope_fp32.cu src/kernels/rope_fp32_hf.cu src/kernels/rope.cu src/kernels/embedding.cu src/kernels/pytorch_ln_kernel.cu
-    src/kernels/rms_norm.cu src/kernels/build_qkv_fp32.cu src/kernels/flash_fp32.cu
-    src/kernels/quantize.cu src/kernels/sparse_attn.cu src/kernels/linear_fp32.cu src/kernels/linear_q4.cu
+    src/kernels/pytorch_ln_kernel.cu
+    src/kernels/build_qkv_fp32.cu src/kernels/flash_fp32.cu
+    src/kernels/quantize.cu src/kernels/sparse_attn.cu src/kernels/linear_fp32.cu
     src/kernels/ssm_kernels_fp32.cu src/kernels/ssm_lsc_scan.cu src/kernels/activation_fp32.cu
     src/kernels/loss_fp32.cu src/kernels/norm_fp32.cu
-    src/model_fp32.cu src/model_infer.cu src/model_forward_v2.cu src/model_train_v2.cu
+    src/model_fp32.cu src/model_forward_v2.cu src/model_train_v2.cu
     src/kernels/optimizer_fp32.cu src/kernels/tensor_utils.cu src/train_fp32.cu
     src/arch/gqa/gqa_layer.cu src/arch/ssm/rina_ssm_layer.cu src/arch/mla/rina_mla_layer.cu
     src/arch/mla/deepseek_mla_layer.cu src/arch/register_layers.cu src/training/train.cu)
