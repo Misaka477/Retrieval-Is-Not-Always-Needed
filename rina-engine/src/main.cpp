@@ -143,7 +143,48 @@ int main(int argc, char** argv) {
     }
     if (seed) rng.seed(seed);
 
-    if (!model_path) { fprintf(stderr, "Usage: rina_infer --model model.rinn [--prompt \"Hello\"] [--ids \"1 2 3\"] [--steps N]\n"); return 1; }
+    if (!model_path) {
+        fprintf(stderr, "Usage: rina_infer --model model.rinn [--prompt \"Hello\"] [--steps N]\n");
+        return 1;
+    }
+    if (prompt.empty()) {
+        if (g_prompt_text.empty()) {
+            fprintf(stderr, "Error: use --prompt \"text\" or --ids \"id id id\"\n");
+            return 1;
+        }
+        // Tokenize via llama_cpp_python in natalia environment
+        char cmd[2048];
+        snprintf(cmd, sizeof(cmd),
+            "source /home/aquama/miniconda3/etc/profile.d/conda.sh && "
+            "conda activate natalia 2>/dev/null && "
+            "python3 -c \"from llama_cpp import Llama; "
+            "llm = Llama('%s', n_gpu_layers=-1, n_ctx=128, verbose=False); "
+            "t = llm.tokenize(b'%s'); "
+            "print(' '.join(str(x) for x in t))\" 2>/dev/null",
+            model_path, g_prompt_text.c_str());
+        FILE* fp = popen(cmd, "r");
+        if (fp) {
+            char buf[4096]; int n;
+            while ((n = fread(buf, 1, sizeof(buf)-1, fp)) > 0) {
+                buf[n] = 0;
+                char* p = buf;
+                while (*p) {
+                    while (*p == ' ') p++;
+                    if (*p == 0) break;
+                    prompt.push_back(atoi(p));
+                    while (*p && *p != ' ') p++;
+                }
+            }
+            pclose(fp);
+        }
+        if (prompt.empty()) {
+            // Fallback
+            prompt = {100000, 17464};  // BOS + "Hello"
+        }
+        fprintf(stderr, "  tokens:");
+        for (int t : prompt) fprintf(stderr, " %d", t);
+        fprintf(stderr, "\n");
+    }
 
     ModelConfig cfg;
     TensorMap weights;
@@ -155,7 +196,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "  kv-quant: %s\n", kv_quant_mode.c_str());
     if (use_gguf) {
         fprintf(stderr, "Loading GGUF model: %s\n", model_path);
-        if (!load_gguf_model(model_path, cfg, weights)) {
+        if (!load_gguf_model(model_path, cfg, weights, 0)) {  // 0 = all layers
             fprintf(stderr, "Failed to load GGUF model: %s\n", model_path); return 1;
         }
     } else {
@@ -199,10 +240,11 @@ int main(int argc, char** argv) {
     if (use_pytorch) pt_init(cfg, weights, true/*embed*/, true/*ln*/, false/*attn*/, true/*cproj*/, true/*mlp*/);
 #endif
 
-    int B = 1, max_seq_len = cfg.max_seq_len > 0 ? cfg.max_seq_len : 512;
+    int B = 1, max_seq_len = cfg.max_seq_len > 0 ? std::min(cfg.max_seq_len, 512) : 512;
     int* d_ids; float* d_logits;
+    int logit_cap = (int)prompt.size() + steps;
     cudaMalloc(&d_ids, B * (max_seq_len + steps) * sizeof(int));
-    cudaMalloc(&d_logits, B * (max_seq_len + steps) * cfg.vocab_size * sizeof(float));
+    cudaMalloc(&d_logits, B * logit_cap * cfg.vocab_size * sizeof(float));
 
     cudaStream_t s; cudaStreamCreate(&s);
     cudaMemcpyAsync(d_ids, prompt.data(), prompt.size() * sizeof(int), cudaMemcpyHostToDevice, s);

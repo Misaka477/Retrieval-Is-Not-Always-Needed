@@ -11,8 +11,9 @@ struct WeightTensor {
     int        n_dim;
     QuantType  quant_type;
     int        n_elems;
+    bool       owned;
 
-    WeightTensor() : data(nullptr), n_dim(0), quant_type(QuantType::FP32), n_elems(0) {
+    WeightTensor() : data(nullptr), n_dim(0), quant_type(QuantType::FP32), n_elems(0), owned(true) {
         for (int i = 0; i < 4; i++) shape[i] = 0;
     }
 
@@ -25,7 +26,7 @@ struct WeightTensor {
         cudaMemcpy(data, host_data, bytes, cudaMemcpyHostToDevice);
     }
 
-    void free() { if (data) { cudaFree(data); data = nullptr; } }
+    void free() { if (data && owned) { cudaFree(data); data = nullptr; } }
 };
 
 struct TensorMap {

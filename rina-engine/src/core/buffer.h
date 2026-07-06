@@ -64,8 +64,36 @@ struct ForwardBuffers {
     } kv_cache_quant;
 
     // Scratch buffer for attention with KV cache expansion (optional)
-    // Sized for Kf_expanded + Vf_expanded: [2, B, H, max_seq, head_dim]
+    // Sized for Qf_expanded + Kf_expanded + Vf_expanded: [B, H, max_seq, dq] + [B, H, max_seq, dq] + [B, H, max_seq, dh]
     float* attn_scratch;
+    int attn_dq;  // dq for attn_scratch layout (may differ from head_dim for MLA)
+
+    // MLA KV cache for incremental inference
+    // Per-layer: k_pe[max_seq, rope_dim] + k_nope[max_seq, n_kv_heads, nope_dim] + v[max_seq, n_kv_heads, v_dim]
+    struct {
+        float* data;
+        int    max_seq;
+        int    n_layers;
+        int    n_kv_heads;
+        int    rope_dim;
+        int    nope_dim;
+        int    v_dim;
+        int    start_pos;
+
+        float* k_pe(int layer) const {
+            return data + (size_t)layer * max_seq * (rope_dim + n_kv_heads * nope_dim + n_kv_heads * v_dim);
+        }
+        float* k_nope(int layer) const {
+            return k_pe(layer) + (size_t)max_seq * rope_dim;
+        }
+        float* v(int layer) const {
+            return k_nope(layer) + (size_t)max_seq * n_kv_heads * nope_dim;
+        }
+    } mla_kv_cache;
+
+    // Pre-allocated temp buffer for dequant+matmul to avoid OOM from fragmentation
+    float* dequant_tmp;
+    size_t dequant_tmp_size;
 };
 
 // Gradient buffers — separate pool, never aliases weight or forward buffers
@@ -110,7 +138,8 @@ struct BufferManager {
     void alloc_wgrad(int total_weight_elems);
     void alloc_kv_cache(int n_layers, int max_seq, int n_kv_heads, int head_dim);
     void alloc_kv_cache_quant(int n_layers, int max_seq, int n_kv_heads, int head_dim, int mode);
-    void alloc_attn_scratch(int B, int max_seq, int n_heads, int head_dim);
+    void alloc_attn_scratch(int B, int max_seq, int n_heads, int head_dim, int dq = 0);
+    void alloc_mla_kv_cache(int n_layers, int max_seq, int n_kv_heads, int rope_dim, int nope_dim, int v_dim);
 
     void zero_grad(cudaStream_t stream);
     void free_all();

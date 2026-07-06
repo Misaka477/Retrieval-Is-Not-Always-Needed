@@ -111,7 +111,8 @@ static bool read_gguf_header(const std::string& path,
                               std::vector<GGUFTensorInfo>& tensors,
                               uint64_t& data_start, int& n_layers,
                               int& dim, int& n_heads, int& n_kv_heads,
-                              int& head_dim, int& vocab_size, int& max_seq_len) {
+                              int& head_dim, int& vocab_size, int& max_seq_len,
+                              int& d_c, int& d_h_r, int& dq, int& v_head_dim) {
     std::ifstream f(path, std::ios::binary);
     if (!f) { fprintf(stderr, "Cannot open %s\n", path.c_str()); return false; }
 
@@ -127,7 +128,7 @@ static bool read_gguf_header(const std::string& path,
 
     // Read metadata KV pairs
     n_layers = 0; dim = 0; n_heads = 0; n_kv_heads = 0;
-    head_dim = 0; vocab_size = 0; max_seq_len = 0;
+    head_dim = 0; vocab_size = 0; max_seq_len = 0; d_c = 0; dq = 0;
     std::string tokenizer_json;
 
     fprintf(stderr, "  parsing %llu metadata KV pairs...\n", (unsigned long long)n_kv);
@@ -173,20 +174,23 @@ static bool read_gguf_header(const std::string& path,
             if (key == "tokenizer.ggml.model") tokenizer_json = val;
         } else if (val_type == GGUF_TYPE_UINT32 || val_type == GGUF_TYPE_INT32) {
             uint32_t val; f.read((char*)&val, 4);
-            auto dot = key.find('.');
+            auto dot = key.rfind('.');
             auto suff = (dot != std::string::npos) ? key.substr(dot + 1) : key;
             if (suff == "block_count") { n_layers = val; fprintf(stderr,"  n_layers=%d\n",n_layers); }
             if (suff == "embedding_length") { dim = val; fprintf(stderr,"  dim=%d\n",dim); }
-            if (suff == "attention.head_count") { n_heads = val; }
-            if (suff == "attention.head_count_kv") { n_kv_heads = val; }
-            if (suff == "rope.dimension_count") { head_dim = val; }
+            if (suff == "head_count") { n_heads = val; }
+            if (suff == "head_count_kv") { n_kv_heads = val; }
+            if (suff == "dimension_count") { d_h_r = val; head_dim = val; fprintf(stderr,"  rope.dim=%d\n",d_h_r); }
             if (suff == "context_length") { max_seq_len = val; }
             if (suff == "embedding_length") dim = val;
-            if (suff == "attention.head_count") n_heads = val;
-            if (suff == "attention.head_count_kv") n_kv_heads = val;
-            if (suff == "rope.dimension_count") head_dim = val;
+            if (suff == "head_count") n_heads = val;
+            if (suff == "head_count_kv") n_kv_heads = val;
+            if (suff == "dimension_count") { d_h_r = val; head_dim = val; }
             if (suff == "context_length") max_seq_len = val;
             if (suff == "vocab_size") vocab_size = val;
+            if (suff == "kv_lora_rank") { d_c = val; fprintf(stderr,"  kv_lora_rank=%d\n",d_c); }
+            if (suff == "key_length") { dq = val; fprintf(stderr,"  key_length=%d\n",dq); }
+            if (suff == "value_length") { v_head_dim = val; fprintf(stderr,"  value_length=%d\n",v_head_dim); }
         } else if (val_type == GGUF_TYPE_ARRAY) {
             uint32_t arr_type; f.read((char*)&arr_type, 4);
             uint64_t arr_len; f.read((char*)&arr_len, 8);
@@ -274,6 +278,17 @@ static std::string gguf_to_rinn_name(const std::string& gguf_name, int l) {
     if (local == "ffn_gate.weight")         return prefix + "mlp.w1.weight";
     if (local == "ffn_up.weight")           return prefix + "mlp.w3.weight";
     if (local == "ffn_down.weight")         return prefix + "mlp.w2.weight";
+
+    if (local == "attn_kv_a_mqa.weight")    return prefix + "attn.w_kv_a.weight";
+    if (local == "attn_kv_a_norm.weight")   return prefix + "attn.k_norm.weight";
+    if (local == "attn_kv_b.weight")        return prefix + "attn.w_kv_b.weight";
+    if (local == "ffn_gate_inp.weight")     return prefix + "mlp.gate_inp.weight";
+    if (local == "ffn_gate_exps.weight")    return prefix + "mlp.gate_exps.weight";
+    if (local == "ffn_up_exps.weight")      return prefix + "mlp.up_exps.weight";
+    if (local == "ffn_down_exps.weight")    return prefix + "mlp.down_exps.weight";
+    if (local == "ffn_gate_shexp.weight")   return prefix + "mlp.gate_shexp.weight";
+    if (local == "ffn_up_shexp.weight")     return prefix + "mlp.up_shexp.weight";
+    if (local == "ffn_down_shexp.weight")   return prefix + "mlp.down_shexp.weight";
 
     return "";
 }
@@ -490,16 +505,19 @@ static void dequant_q4_0(const uint8_t* src, float* dst, int n) {
 
 // ── Main GGUF loader ──────────────────────────────────────────
 
-bool load_gguf_model(const char* path, ModelConfig& cfg, TensorMap& tensors) {
+bool load_gguf_model(const char* path, ModelConfig& cfg, TensorMap& tensors, int max_layers) {
     std::vector<GGUFTensorInfo> gguf_tensors;
     uint64_t data_start;
     int n_layers = 0, dim = 0, n_heads = 0, n_kv_heads = 0;
     int head_dim = 0, vocab_size = 0, max_seq_len = 0;
+    int d_c = 0, d_h_r = 0, dq = 0, v_head_dim = 0;
 
     if (!read_gguf_header(path, gguf_tensors, data_start,
                           n_layers, dim, n_heads, n_kv_heads,
-                          head_dim, vocab_size, max_seq_len))
+                          head_dim, vocab_size, max_seq_len, d_c, d_h_r, dq, v_head_dim))
         return false;
+
+    bool is_deepseek = (d_c > 0 && dq > 0);
 
     // Build RINN config
     if (head_dim == 0) head_dim = dim / n_heads;
@@ -541,6 +559,14 @@ bool load_gguf_model(const char* path, ModelConfig& cfg, TensorMap& tensors) {
         }
     }
 
+    if (is_deepseek) {
+        cfg.name = "deepseek2-" + std::to_string(dim / 1000) + "dim";
+        cfg.d_c = d_c;
+        cfg.layers.clear();
+        for (int i = 0; i < n_layers; i++)
+            cfg.layers.push_back({"deepseek_mla_moe", "layer_" + std::to_string(i), 1, {}});
+    }
+
     // Read and dequantize tensors
     int n_fp32 = 0, n_q4 = 0;
     for (auto& gt : gguf_tensors) {
@@ -549,6 +575,10 @@ bool load_gguf_model(const char* path, ModelConfig& cfg, TensorMap& tensors) {
             // Try lm_head / output.weight handling
             if (gt.name == "output.weight") rinn_name = "transformer.wte.weight";
             else continue;
+        }
+        if (max_layers > 0 && is_layer_weight(gt.name)) {
+            int li = layer_index(gt.name);
+            if (li >= max_layers) continue;
         }
 
         int64_t n_elems = 1;
@@ -561,10 +591,11 @@ bool load_gguf_model(const char* path, ModelConfig& cfg, TensorMap& tensors) {
         size_t raw_size = (size_t)n_blocks * type_sz;
 
         // For GGML quant types: upload raw quantized blocks to GPU directly
-        if (gt.ggml_type == GGML_TYPE_Q4_K ||
+        bool is_embed = (gt.name == "token_embd.weight");
+        if (!is_embed && (gt.ggml_type == GGML_TYPE_Q4_K ||
             gt.ggml_type == GGML_TYPE_Q6_K ||
             gt.ggml_type == GGML_TYPE_IQ4_XS ||
-            gt.ggml_type == GGML_TYPE_Q5_K) {
+            gt.ggml_type == GGML_TYPE_Q5_K)) {
 
             std::vector<uint8_t> raw(raw_size);
             fseek(f, gt.offset, SEEK_SET);
@@ -609,6 +640,9 @@ bool load_gguf_model(const char* path, ModelConfig& cfg, TensorMap& tensors) {
                 break;
             case GGML_TYPE_Q4_0:
                 dequant_q4_0(raw.data(), f32_buf.data(), n_elems);
+                break;
+            case GGML_TYPE_Q6_K:
+                dequant_q6_K(raw.data(), f32_buf.data(), n_elems);
                 break;
             default:
                 fprintf(stderr, "  unsupported ggml_type=%d for %s\n",

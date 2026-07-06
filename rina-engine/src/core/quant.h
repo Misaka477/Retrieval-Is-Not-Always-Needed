@@ -9,7 +9,7 @@
 enum class QuantType : int {
     Q2_1 = 1, Q1_0 = 2, Q2K_Q1V_LSC_Q4 = 3, LSC_Q4 = 4, Q4_0 = 5, FP32 = 6, Q4_0F = 7,
     // GGML/GGUF types (keep on GPU as quantized blocks)
-    GGML_Q4_K = 12, GGML_Q5_K = 13, GGML_Q6_K = 14, GGML_IQ4_XS = 23
+    GGML_Q2_K = 10, GGML_Q3_K = 11, GGML_Q4_K = 12, GGML_Q5_K = 13, GGML_Q6_K = 14, GGML_IQ4_NL = 20, GGML_IQ4_XS = 23
 };
 
 // block structs only used by CUDA kernels (quantize.cu)
@@ -44,18 +44,24 @@ inline size_t q1_0_block_size() { return 6; }    // half(2) + uint32_t(4)
 
 inline int ggml_block_size(QuantType qt) {
     switch (qt) {
+        case QuantType::GGML_Q2_K: return 256;
+        case QuantType::GGML_Q3_K: return 256;
         case QuantType::GGML_Q4_K: return 256;
         case QuantType::GGML_Q5_K: return 256;
         case QuantType::GGML_Q6_K: return 256;
+        case QuantType::GGML_IQ4_NL: return 32;
         case QuantType::GGML_IQ4_XS: return 256;
         default: return elements_per_block(qt);
     }
 }
 inline int ggml_type_size(QuantType qt) {
     switch (qt) {
+        case QuantType::GGML_Q2_K: return 84;
+        case QuantType::GGML_Q3_K: return 110;
         case QuantType::GGML_Q4_K: return 144;
         case QuantType::GGML_Q5_K: return 176;
         case QuantType::GGML_Q6_K: return 210;
+        case QuantType::GGML_IQ4_NL: return 18;
         case QuantType::GGML_IQ4_XS: return 136;
         default: return 4;
     }

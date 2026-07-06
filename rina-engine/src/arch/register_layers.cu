@@ -7,6 +7,8 @@ Layer create_gqa_layer();
 Layer create_gqa_bf16_layer();
 Layer create_rina_ssm_layer();
 Layer create_rina_mla_layer();
+Layer create_deepseek_mla_dense_layer();
+Layer create_deepseek_mla_moe_layer();
 
 Layer* create_layer_by_type(const std::string& type) {
     Layer* l = new Layer();
@@ -18,6 +20,10 @@ Layer* create_layer_by_type(const std::string& type) {
         *l = create_rina_ssm_layer();
     } else if (type == "sparse_gather_fa" || type == "mla") {
         *l = create_rina_mla_layer();
+    } else if (type == "deepseek_mla_dense") {
+        *l = create_deepseek_mla_dense_layer();
+    } else if (type == "deepseek_mla_moe") {
+        *l = create_deepseek_mla_moe_layer();
     } else {
         delete l;
         return nullptr;

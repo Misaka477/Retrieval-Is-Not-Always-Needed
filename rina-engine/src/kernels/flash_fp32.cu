@@ -98,6 +98,14 @@ void launch_flash_attn_fp32(const float* Q, const float* K, const float* V, floa
     int Bh = B * H;
     int grid_y = (T + Br - 1) / Br;
     int shmem = (Bc * dq + Bc * dh + Br * dh) * sizeof(float);
+    if (shmem > 48 * 1024) {
+        static bool attr_set = false;
+        if (!attr_set) {
+            cudaFuncSetAttribute(flashattn_fwd_tiled,
+                cudaFuncAttributeMaxDynamicSharedMemorySize, shmem);
+            attr_set = true;
+        }
+    }
     dim3 grid(Bh, grid_y);
     flashattn_fwd_tiled<<<grid, 32, shmem, stream>>>(Q, K, V, O, Bh, T, dq, dh);
 }

@@ -11,7 +11,8 @@ bool load_hf_model(const char* dir_path, ModelConfig& cfg, TensorMap& tensors,
                    int quant_bits = 4);
 
 // GGUF model loader: reads GGUF format (llama.cpp ecosystem)
-bool load_gguf_model(const char* path, ModelConfig& cfg, TensorMap& tensors);
+// max_layers: limit to first N layers (0 = all)
+bool load_gguf_model(const char* path, ModelConfig& cfg, TensorMap& tensors, int max_layers = 0);
 
 // v1: inline arch code (current, to be replaced)
 void model_forward_direct(ModelConfig& cfg, const TensorMap& w,

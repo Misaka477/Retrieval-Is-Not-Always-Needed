@@ -32,7 +32,7 @@ set(RINA_CUDA_SRC
     src/model_fp32.cu src/model_infer.cu src/model_forward_v2.cu src/model_train_v2.cu
     src/kernels/optimizer_fp32.cu src/kernels/tensor_utils.cu src/train_fp32.cu
     src/arch/gqa/gqa_layer.cu src/arch/ssm/rina_ssm_layer.cu src/arch/mla/rina_mla_layer.cu
-    src/arch/register_layers.cu src/training/train.cu)
+    src/arch/mla/deepseek_mla_layer.cu src/arch/register_layers.cu src/training/train.cu)
 
 add_executable(rina_infer ${RINA_SRC} ${RINA_CUDA_SRC})
 target_include_directories(rina_infer PUBLIC src)

@@ -131,12 +131,31 @@ void BufferManager::alloc_kv_cache_quant(int n_layers, int max_seq, int n_kv_hea
     fwd.kv_cache_quant.start_pos = 0;
 }
 
-void BufferManager::alloc_attn_scratch(int B, int max_seq, int n_heads, int head_dim) {
-    size_t bytes = (size_t)B * max_seq * n_heads * head_dim * 3 * sizeof(float); // Qf + Kf + Vf
+void BufferManager::alloc_attn_scratch(int B, int max_seq, int n_heads, int head_dim, int dq) {
+    int attn_dq = (dq > 0) ? dq : head_dim;
+    size_t bytes = (size_t)B * max_seq * n_heads * (attn_dq + attn_dq + head_dim) * sizeof(float);
     cudaFree(fwd.attn_scratch);
     fwd.attn_scratch = nullptr;
     cudaMalloc(&fwd.attn_scratch, bytes);
     if (fwd.attn_scratch) cudaMemset(fwd.attn_scratch, 0, bytes);
+    fwd.attn_dq = attn_dq;
+}
+
+void BufferManager::alloc_mla_kv_cache(int n_layers, int max_seq, int n_kv_heads,
+                                       int rope_dim, int nope_dim, int v_dim) {
+    size_t per_token = (size_t)rope_dim + (size_t)n_kv_heads * nope_dim + (size_t)n_kv_heads * v_dim;
+    size_t bytes = (size_t)n_layers * max_seq * per_token * sizeof(float);
+    cudaFree(fwd.mla_kv_cache.data);
+    fwd.mla_kv_cache.data = nullptr;
+    cudaMalloc(&fwd.mla_kv_cache.data, bytes);
+    if (fwd.mla_kv_cache.data) cudaMemset(fwd.mla_kv_cache.data, 0, bytes);
+    fwd.mla_kv_cache.max_seq = max_seq;
+    fwd.mla_kv_cache.n_layers = n_layers;
+    fwd.mla_kv_cache.n_kv_heads = n_kv_heads;
+    fwd.mla_kv_cache.rope_dim = rope_dim;
+    fwd.mla_kv_cache.nope_dim = nope_dim;
+    fwd.mla_kv_cache.v_dim = v_dim;
+    fwd.mla_kv_cache.start_pos = 0;
 }
 
 void BufferManager::free_all() {
@@ -148,8 +167,9 @@ void BufferManager::free_all() {
     cudaFree(fwd.fl);   fwd.fl = nullptr;
     cudaFree(fwd.save); fwd.save = nullptr;
     cudaFree(fwd.kv_cache_quant.data); fwd.kv_cache_quant.data = nullptr;
-    cudaFree(fwd.kv_cache_quant.data); fwd.kv_cache_quant.data = nullptr;
     cudaFree(fwd.kv_cache.data);   fwd.kv_cache.data = nullptr;
+    cudaFree(fwd.mla_kv_cache.data); fwd.mla_kv_cache.data = nullptr;
+    cudaFree(fwd.dequant_tmp);       fwd.dequant_tmp = nullptr; fwd.dequant_tmp_size = 0;
     cudaFree(fwd.attn_scratch);    fwd.attn_scratch = nullptr;
     cudaFree(grad.dh);  grad.dh = nullptr;
     cudaFree(grad.da);  grad.da = nullptr;
