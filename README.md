@@ -35,6 +35,80 @@ Efficient language modeling with **Jamba-style hybrid**: SSM (InertiaWave) + Spa
 |--------|--------|--------|
 | CF dynamic routing (conf_head) | ❌ | Training not converged |
 
+## Inference Engine (C++ / CUDA)
+
+A CUDA C++ inference engine for both custom **GQA** (Llama) and **MLA** (DeepSeek V2) architectures, with full GGUF format support.
+
+```
+rina-engine/src/
+├── ops/       ← Ops (arch-independent): linear / rms_norm / rope / embedding / silu_mul / saxpy
+├── arch/      ← Architecture definitions: GQA (gqa_layer) / MLA (deepseek_mla_layer) / SSM
+├── loader/    ← GGUF reader + ArchLoader registry: gqa & mla name mappings
+├── infer/     ← Inference orchestrators: GQA engine / MLA engine (Inference interface)
+├── core/      ← Infrastructure: buffer / tensor / config / quant
+└── main.cpp   ← CLI entry point (uses Inference interface)
+```
+
+### Supported Models
+
+| Model | Architecture | Quantization | VRAM |
+|-------|-------------|--------------|------|
+| Llama 3.2 1B | GQA | fp32 / Q4_0F | 4.7 GB / 1.6 GB |
+| DeepSeek-V2-Lite | MLA + MoE | Q2_K / IQ3_XS | 6.4 GB / 7.1 GB |
+
+### Build & Run
+
+```bash
+cd rina-engine && mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc)
+
+# GQA — Llama 3.2 1B (fp32)
+./rina_infer --model /path/to/llama3.2-1b-fp32 \
+  --ids "128000 791 7438 315 2324 374" --temp 0.0 --steps 30
+
+# MLA — DeepSeek-V2-Lite (GGUF, Q2_K)
+./rina_infer --model DeepSeek-V2-Lite.Q2_K.gguf --gguf \
+  --prompt "Hello" --temp 1.0 --topk 40 --steps 15
+
+# GQA — with KV cache quant (q8 / q4 / q2k_q1v)
+./rina_infer --model /path/to/llama3.2-1b-fp32 \
+  --ids "128000 791 7438 315 2324 374" --kv-quant q8 --steps 30
+```
+
+### Quantization Formats
+
+| Format | Type ID | Block Size | BPW | Support |
+|--------|---------|------------|-----|---------|
+| GGML_Q2_K | 10 | 256 | 2.625 | GPU fused kernel (M=1) + dequant |
+| GGML_Q3_K | 11 | 256 | 3.44 | GPU dequant |
+| IQ3_XXS | 18 | 256 | 3.06 | GPU dequant |
+| IQ3_S | 21 | 256 | 3.44 | GPU dequant |
+| GGML_Q4_K | 12 | 256 | 4.5 | GPU dequant |
+| GGML_Q5_K | 13 | 256 | 5.5 | GPU dequant |
+| GGML_Q6_K | 14 | 256 | 6.6 | GPU dequant |
+| IQ4_NL | 20 | 32 | 4.5 | GPU dequant |
+| IQ4_XS | 23 | 256 | 4.25 | GPU dequant |
+| Q4_0 (RINA) | 5 | 32 | 4.5 | GPU native |
+| Q4_0F (RINA) | 7 | 32 | 5.0 | GPU native |
+
+### Build Targets
+
+28 targets total: `rina_infer` + 27 test/alignment targets. All pass.
+
+### Architecture Evolution
+
+| Gen | Architecture | Training | Inference |
+|-----|-------------|----------|-----------|
+| 1 | SSM (InertiaWave) | PyTorch | — |
+| 2 | MoHE (MoE+Attractor) | PyTorch | — |
+| 3 | RWKV-v7 | PyTorch | — |
+| 4 | AR + Stateful Denoiser | PyTorch | — |
+| 5 | MLA + GQA | PyTorch | C++ engine (fp32) |
+| 6 | Jamba Hybrid (SSM+Sparse) | PyTorch | C++ engine (q4+q2) |
+
+All training on a single **RTX 3070 Ti Laptop (8 GB VRAM)**.
+
 ## Quick Start
 
 ```bash
@@ -100,33 +174,31 @@ l, _ = m(x)  # l.shape = [B, T, 128256]
 ## Project Structure
 
 ```
-rina/
-  model_jamba.py       ← ★ Jamba hybrid (SSM+Sparse interleaved)
-  model_jamba_lq.py    ← Jamba + log-space SSM + q4 intermediates
-  model_jamba_qw.py    ← Jamba + q4 weights + LSC q4 + q2+q1 KV
-  model_a.py           ← Route A (full attention MLA)
-  model_c.py           ← InertiaWave SSM
-  model_l3x.py         ← Sparse Gather FA (K=16, W=32)
-  train_jamba.py       ← ★ Recommended Jamba training
-  train_jamba_v2.py    ← q2+q1 KV version
-  train_jamba_lq.py    ← LSC q4 SSM version
-  train_jamba_qw.py    ← QW extreme version
-  model_cf.py          ← DEPRECATED: CF routing
-  train_cf.py          ← DEPRECATED: CF routing training
+rina/                     ★ PyTorch training (Gen 6 Jamba)
+  model_jamba.py          ← Jamba hybrid (SSM+Sparse interleaved)
+  model_jamba_qw.py       ← QW extreme quant (q4 weights + LSC q4 + q2+q1 KV)
+  model_jamba_qw2.py      ← QW v2 — quant-aware training
+  model_jamba_qw3.py      ← QW v3 — multi-stage quant pipeline
+  train_jamba.py          ← Recommended Jamba training
+  train_jamba_qw.py       ← QW extreme training
+  train_jamba_qw2.py      ← QW v2 training
+  train_jamba_qw3.py      ← QW v3 training
 
-experiments/
-  download_dclm_v2.py  ← Data download (skip + chunked save)
-  download_starcode_v2.py
-  download_math_v2.py
-  download_chinese_v2.py
-  mix_data_v2.py       ← Merge all 4 sources into training npy
+rina-engine/              ★ C++ inference engine
+  src/ops/                ─ Ops: linear / rms_norm / rope / embedding / silu_mul / saxpy
+  src/arch/               ─ Arch: GQA (gqa_layer) / MLA (deepseek_mla_layer) / SSM
+  src/loader/             ─ Loader: GGUF reader + ArchLoader registry
+  src/infer/              ─ Inference: GQA engine / MLA engine (Inference interface)
+  src/core/               ─ Core: buffer / tensor / config / quant
+  tests/                  ─ 27 test/alignment targets
 
-docs/
-  RINA_实验总览.md      ← Experiment overview (9800+ lines)
+experiments/               Data pipeline scripts
 
-checkpoints/           ← weights (gitignored)
-models/                ← trained checkpoints (gitignored)
-data/                  ← training data (gitignored)
+archive/                   All legacy code (Gen1-Gen5, old experiments, gitignored)
+
+docs/                      Experiment logs & design docs
+
+paper/                     Paper draft
 ```
 
 ## Checkpoints
@@ -191,6 +263,80 @@ mikotomisaka477@gmail.com
 | Jamba 混合 (SSM×3+Sparse×1) | ✅ | CE 4.8, 英文通顺 |
 | CF 动态路由 | ❌ | 训练未收敛，已弃用 |
 
+## 推理引擎（C++ / CUDA）
+
+CUDA C++ 推理引擎，支持 **GQA**（Llama）和 **MLA**（DeepSeek V2）两种 Attention 架构，完整 GGUF 格式加载。
+
+```
+rina-engine/src/
+├── ops/       ← 算子（与架构无关）：linear / rms_norm / rope / embedding / silu_mul / saxpy
+├── arch/      ← 架构定义：GQA（gqa_layer）/ MLA（deepseek_mla_layer）/ SSM
+├── loader/    ← GGUF 读取 + ArchLoader 注册表：GQA & MLA 名映射
+├── infer/     ← 推理编排：GQA 引擎 / MLA 引擎（Inference 接口）
+├── core/      ← 基础设施：buffer / tensor / config / quant
+└── main.cpp   ← CLI 入口（通过 Inference 接口调用）
+```
+
+### 已支持模型
+
+| 模型 | 架构 | 量化 | 显存 |
+|------|------|------|------|
+| Llama 3.2 1B | GQA | fp32 / Q4_0F | 4.7 GB / 1.6 GB |
+| DeepSeek-V2-Lite | MLA + MoE | Q2_K / IQ3_XS | 6.4 GB / 7.1 GB |
+
+### 编译与运行
+
+```bash
+cd rina-engine && mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc)
+
+# GQA — Llama 3.2 1B (fp32)
+./rina_infer --model /path/to/llama3.2-1b-fp32 \
+  --ids "128000 791 7438 315 2324 374" --temp 0.0 --steps 30
+
+# MLA — DeepSeek-V2-Lite (GGUF, Q2_K)
+./rina_infer --model DeepSeek-V2-Lite.Q2_K.gguf --gguf \
+  --prompt "Hello" --temp 1.0 --topk 40 --steps 15
+
+# GQA — 搭配 KV cache 量化 (q8 / q4 / q2k_q1v)
+./rina_infer --model /path/to/llama3.2-1b-fp32 \
+  --ids "128000 791 7438 315 2324 374" --kv-quant q8 --steps 30
+```
+
+### 量化格式支持
+
+| 格式 | 类型 ID | 块大小 | BPW | 支持情况 |
+|------|---------|--------|-----|----------|
+| GGML_Q2_K | 10 | 256 | 2.625 | GPU 融合 kernel (M=1) + 反量化 |
+| GGML_Q3_K | 11 | 256 | 3.44 | GPU 反量化 |
+| IQ3_XXS | 18 | 256 | 3.06 | GPU 反量化 |
+| IQ3_S | 21 | 256 | 3.44 | GPU 反量化 |
+| GGML_Q4_K | 12 | 256 | 4.5 | GPU 反量化 |
+| GGML_Q5_K | 13 | 256 | 5.5 | GPU 反量化 |
+| GGML_Q6_K | 14 | 256 | 6.6 | GPU 反量化 |
+| IQ4_NL | 20 | 32 | 4.5 | GPU 反量化 |
+| IQ4_XS | 23 | 256 | 4.25 | GPU 反量化 |
+| Q4_0 (RINA) | 5 | 32 | 4.5 | GPU 原生 |
+| Q4_0F (RINA) | 7 | 32 | 5.0 | GPU 原生 |
+
+### 构建目标
+
+共 28 个目标：`rina_infer` + 27 个测试/对齐目标，全部通过。
+
+### 架构演进
+
+| 代 | 架构 | 训练 | 推理 |
+|----|------|------|------|
+| Gen 1 | SSM (InertiaWave) | PyTorch | — |
+| Gen 2 | MoHE (MoE+Attractor) | PyTorch | — |
+| Gen 3 | RWKV-v7 | PyTorch | — |
+| Gen 4 | AR + Stateful Denoiser | PyTorch | — |
+| Gen 5 | MLA + GQA | PyTorch | C++ 引擎 (fp32) |
+| Gen 6 | Jamba 混合 (SSM+Sparse) | PyTorch | C++ 引擎 (q4+q2) |
+
+全部训练在单张 **RTX 3070 Ti Laptop（8 GB 显存）** 上完成。
+
 ## 快速开始
 
 ```bash
@@ -247,33 +393,31 @@ l, _ = m(x)  # l.shape = [B, T, 128256]
 ## 包结构
 
 ```
-rina/
-  model_jamba.py       ← ★ Jamba 混合（SSM+Sparse 交错）
-  model_jamba_lq.py    ← Jamba + log-space SSM + q4 中间
-  model_jamba_qw.py    ← Jamba + q4 权重 + LSC q4 + q2+q1 KV
-  model_a.py           ← Route A（全量 attention MLA）
-  model_c.py           ← InertiaWave SSM
-  model_l3x.py         ← Sparse Gather FA (K=16, W=32)
-  train_jamba.py       ← ★ 推荐训练脚本
-  train_jamba_v2.py    ← q2+q1 KV 版本
-  train_jamba_lq.py    ← LSC q4 SSM 版本
-  train_jamba_qw.py    ← QW 极压版本
-  model_cf.py          ← 已弃用: CF 路由
-  train_cf.py          ← 已弃用: CF 训练
+rina/                     ★ PyTorch 训练（Gen 6 Jamba）
+  model_jamba.py          ← Jamba 混合（SSM+Sparse 交错）
+  model_jamba_qw.py       ← QW 极压量化（q4 权重 + LSC q4 + q2+q1 KV）
+  model_jamba_qw2.py      ← QW v2 — 量化感知训练
+  model_jamba_qw3.py      ← QW v3 — 多阶段量化管线
+  train_jamba.py          ← 推荐训练脚本
+  train_jamba_qw.py       ← QW 极压训练
+  train_jamba_qw2.py      ← QW v2 训练
+  train_jamba_qw3.py      ← QW v3 训练
 
-experiments/
-  download_dclm_v2.py  ← 下载脚本（跳过已有 + 分块落盘）
-  download_starcode_v2.py
-  download_math_v2.py
-  download_chinese_v2.py
-  mix_data_v2.py       ← 合并 4 源为训练 npy
+rina-engine/              ★ C++ 推理引擎
+  src/ops/                ─ 算子：linear / rms_norm / rope / embedding / silu_mul / saxpy
+  src/arch/               ─ 架构：GQA（gqa_layer）/ MLA（deepseek_mla_layer）/ SSM
+  src/loader/             ─ 加载器：GGUF 读取 + ArchLoader 注册表
+  src/infer/              ─ 推理：GQA 引擎 / MLA 引擎（Inference 接口）
+  src/core/               ─ 基础设施：buffer / tensor / config / quant
+  tests/                  ─ 27 个测试/对齐目标
 
-docs/
-  RINA_实验总览.md      ← 实验总览（9800+ 行）
+experiments/               数据管线脚本
 
-checkpoints/           ← 权重（gitignored）
-models/                ← 训练好的 checkpoint（gitignored）
-data/                  ← 训练数据（gitignored）
+archive/                   全部历史代码（Gen1-Gen5、旧实验，gitignored）
+
+docs/                      实验记录与设计文档
+
+paper/                     论文初稿
 ```
 
 ## Checkpoint 文件
