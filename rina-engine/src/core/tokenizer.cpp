@@ -247,12 +247,16 @@ bool RINNModel::load(const std::string& model_path) {
     path = model_path;
     is_directory = fs::is_directory(model_path);
     
+    auto try_load = [this](const std::string& dir) {
+        if(fs::exists(dir + "/tokenizer.json")) tokenizer.load_dir(dir);
+    };
+    
     if(is_directory){
-        // Load tokenizer from model directory
-        std::string tok_dir = model_path + "/tokenizer";
-        if(fs::exists(tok_dir)) tokenizer.load_dir(tok_dir);
-        else if(fs::exists(model_path + "/tokenizer.json"))
-            tokenizer.load_dir(model_path);  // load from model root dir
+        try_load(model_path);
+    } else {
+        // .rinn file: try tokenizer.json next to it
+        auto parent = fs::path(model_path).parent_path().string();
+        if(!parent.empty()) try_load(parent);
     }
     return true;
 }

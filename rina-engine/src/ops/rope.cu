@@ -141,7 +141,8 @@ __global__ void rope_fp32_kernel(float* x, const float* cos, const float* sin,
 
 void launch_rope_fp32(float* x, const float* cos_table, const float* sin_table,
                        int B, int T, int H, int d, cudaStream_t stream,
-                       int start_pos) {
+                       int start_pos, int d_rot) {
+    if (d_rot <= 0) d_rot = d;
     int n = B * T * H;
     dim3 block(128, 4);
     dim3 grid((n + block.x - 1) / block.x);

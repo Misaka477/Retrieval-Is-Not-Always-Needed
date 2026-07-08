@@ -160,6 +160,7 @@ void ggml_cuda_mul_mat_q(
             ne03, ne13, s03, s13, s3,
             use_stream_k, ne1};
         ggml_cuda_mul_mat_q_switch_type(ctx, args, stream);
+        CUDA_CHECK(cudaStreamSynchronize(stream));
         return;
     }
 

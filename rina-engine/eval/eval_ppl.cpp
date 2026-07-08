@@ -7,7 +7,7 @@
 
 #include "model.h"
 #include "infer/infer_base.h"
-#include "model.h"
+#include "core/tokenizer.h"
 
 static std::vector<int> read_tokens(const char* path) {
     std::vector<int> tokens;
@@ -18,6 +18,17 @@ static std::vector<int> read_tokens(const char* path) {
     if (sz >= 4) { tokens.resize(sz / 4); fread(tokens.data(), 4, tokens.size(), f); }
     fclose(f);
     return tokens;
+}
+
+static std::string read_text(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return {};
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f); rewind(f);
+    std::string s(sz, '\0');
+    fread(&s[0], 1, sz, f);
+    fclose(f);
+    return s;
 }
 
 static double lse(const float* x, int n) {
@@ -34,10 +45,11 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i+1<argc) model_path = argv[++i];
         else if (!strcmp(argv[i], "--tokens") && i+1<argc) tokens_path = argv[++i];
+        else if (!strcmp(argv[i], "--text") && i+1<argc) tokens_path = argv[++i];
         else if (!strcmp(argv[i], "--context") && i+1<argc) ctx = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--stride") && i+1<argc) stride = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--gguf")) gguf = true;
-        else { fprintf(stderr,"Usage...\n"); return 1; }
+        else { fprintf(stderr,"Usage: --model model --tokens file.bin|--text file.txt [--context N] [--stride N] [--gguf]\n"); return 1; }
     }
 
     ModelConfig cfg; TensorMap weights;
@@ -51,10 +63,29 @@ int main(int argc, char** argv) {
     Inference* infer = create_inference(arch);
     if (!infer || !infer->init(cfg, weights)) { fprintf(stderr, "FAIL: init\n"); return 1; }
 
-    auto tokens = read_tokens(tokens_path);
-    int N = (int)tokens.size();
-    if (N < 3) { fprintf(stderr, "<3 tokens\n"); return 1; }
+    // Load tokenizer from model directory (for --text input)
+    RINNModel rinn;
+    rinn.load(model_path);
 
+    std::vector<int> tokens;
+    if (tokens_path) {
+        std::string text = read_text(tokens_path);
+        bool is_text = !text.empty() && text.find('\0') == std::string::npos;
+        if (is_text && rinn.tokenizer.vocab_size() > 0) {
+            tokens = rinn.tokenizer.encode(text);
+            fprintf(stderr, "  text (%zu bytes) → %zu tokens\n", text.size(), tokens.size());
+        } else if (is_text) {
+            fprintf(stderr, "  error: text input requires a tokenizer (model path must have tokenizer.json)\n");
+            return 1;
+        } else {
+            tokens = read_tokens(tokens_path);
+            fprintf(stderr, "  binary tokens: %zu\n", tokens.size());
+        }
+    }
+    if (tokens.empty()) { fprintf(stderr, "No tokens\n"); return 1; }
+    if (tokens.size() < 3) { fprintf(stderr, "<3 tokens\n"); return 1; }
+
+    int N = (int)tokens.size();
     if (ctx > cfg.max_seq_len && cfg.max_seq_len > 0) ctx = cfg.max_seq_len;
     if (stride > ctx) stride = ctx;
 
@@ -71,7 +102,7 @@ int main(int argc, char** argv) {
         if (T < 2) break;
 
         cudaMemcpy(d_ids, &tokens[start], T * sizeof(int), cudaMemcpyHostToDevice);
-        fprintf(stderr,"  [dbg] forward: T=%d start=%d\n", T, start);
+        fprintf(stderr,"  forward: T=%d start=%d\n", T, start);
         infer->forward(d_ids, d_log, 1, T, 0, s);
         cudaStreamSynchronize(s);
 
@@ -89,7 +120,7 @@ int main(int argc, char** argv) {
     }
 
     double ppl = exp(-total_ll / count);
-    fprintf(stderr, "  [result] total_ll=%.4f count=%ld\n", total_ll, count);
+    fprintf(stderr, "  [result] PPL=%.4f (total_ll=%.4f count=%ld)\n", ppl, total_ll, count);
     printf("{\"total_log_prob\":%.10f,\"num_tokens\":%ld,\"ppl\":%.6f}\n", total_ll, count, ppl);
 
     cudaFree(d_ids); cudaFree(d_log); cudaStreamDestroy(s);

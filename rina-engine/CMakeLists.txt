@@ -95,9 +95,7 @@ target_include_directories(eval_ppl PRIVATE ${RINA_LLAMA_DIR}/ggml/src)
 target_include_directories(eval_ppl PRIVATE ${RINA_LLAMA_DIR}/ggml/src/ggml-cuda)
 target_link_libraries(eval_ppl PRIVATE ${RINA_COMMON_LIBS})
 
-add_executable(kernel_compare ${RINA_SRC_NO_MAIN} ${RINA_CUDA_SRC} tools/kernel_compare.cpp)
-target_include_directories(kernel_compare PUBLIC src)
-target_link_libraries(kernel_compare PRIVATE ${RINA_COMMON_LIBS})
+
 
 set(RINA_TEST_CPP src/loader.cpp src/core/layer.cpp src/core/layers_fp32.cpp
     src/core/buffer.cpp src/core/tape.cpp)

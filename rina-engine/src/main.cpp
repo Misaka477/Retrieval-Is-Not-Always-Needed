@@ -148,39 +148,25 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Usage: rina_infer --model model.rinn [--prompt \"Hello\"] [--steps N]\n");
         return 1;
     }
+
+    // Load tokenizer early (needed for --prompt)
+    RINNModel rinn;
+    {
+        std::string tok_path = model_path;
+        rinn.load(tok_path.c_str());
+    }
+
     if (prompt.empty()) {
         if (g_prompt_text.empty()) {
             fprintf(stderr, "Error: use --prompt \"text\" or --ids \"id id id\"\n");
             return 1;
         }
-        // Tokenize via llama_cpp_python in natalia environment
-        char cmd[2048];
-        snprintf(cmd, sizeof(cmd),
-            "source /home/aquama/miniconda3/etc/profile.d/conda.sh && "
-            "conda activate natalia 2>/dev/null && "
-            "python3 -c \"from llama_cpp import Llama; "
-            "llm = Llama('%s', n_gpu_layers=-1, n_ctx=128, verbose=False); "
-            "t = llm.tokenize(b'%s'); "
-            "print(' '.join(str(x) for x in t))\" 2>/dev/null",
-            model_path, g_prompt_text.c_str());
-        FILE* fp = popen(cmd, "r");
-        if (fp) {
-            char buf[4096]; int n;
-            while ((n = fread(buf, 1, sizeof(buf)-1, fp)) > 0) {
-                buf[n] = 0;
-                char* p = buf;
-                while (*p) {
-                    while (*p == ' ') p++;
-                    if (*p == 0) break;
-                    prompt.push_back(atoi(p));
-                    while (*p && *p != ' ') p++;
-                }
-            }
-            pclose(fp);
-        }
-        if (prompt.empty()) {
-            // Fallback
-            prompt = {100000, 17464};  // BOS + "Hello"
+        // Try C++ tokenizer first
+        if (rinn.tokenizer.vocab_size() > 0) {
+            prompt = rinn.tokenizer.encode(g_prompt_text);
+            fprintf(stderr, "  prompt=\"%s\" → %zu tokens\n", g_prompt_text.c_str(), prompt.size());
+        } else {
+            fprintf(stderr, "  warning: no tokenizer found, use --ids instead\n");
         }
         fprintf(stderr, "  tokens:");
         for (int t : prompt) fprintf(stderr, " %d", t);
@@ -225,25 +211,16 @@ int main(int argc, char** argv) {
         cfg.name.c_str(), cfg.n_layers, cfg.dim, cfg.vocab_size,
         use_pytorch ? "[PyTorch ref]" : "[Custom engine]");
     
-    // Load tokenizer from model directory (if available)
-    // For GGUF: look for tokenizer.json in same directory as the .gguf file
-    RINNModel rinn;
-    {
+    // For GGUF: try tokenizer from model dir (same path without .gguf)
+    if (use_gguf && rinn.tokenizer.vocab_size() == 0) {
         std::string tok_path = model_path;
-        if (use_gguf) {
-            // Try directory named after GGUF file (without .gguf extension)
-            auto dot = tok_path.rfind('.');
-            if (dot != std::string::npos) tok_path = tok_path.substr(0, dot);
-        }
+        auto dot = tok_path.rfind('.');
+        if (dot != std::string::npos) tok_path = tok_path.substr(0, dot);
         rinn.load(tok_path.c_str());
     }
-    if(!g_prompt_text.empty()){
-        if(rinn.tokenizer.vocab_size() > 0){
-            prompt = rinn.tokenizer.encode(g_prompt_text);
-            fprintf(stderr, "  prompt=\"%s\" → %zu tokens\n", g_prompt_text.c_str(), prompt.size());
-        } else {
-            fprintf(stderr, "  warning: no tokenizer found in model, use --ids instead\n");
-        }
+    if(rinn.tokenizer.vocab_size() > 0 && !g_prompt_text.empty()){
+        prompt = rinn.tokenizer.encode(g_prompt_text);
+        fprintf(stderr, "  prompt=\"%s\" → %zu tokens\n", g_prompt_text.c_str(), prompt.size());
     }
 
 #ifdef RINA_WITH_PYTORCH

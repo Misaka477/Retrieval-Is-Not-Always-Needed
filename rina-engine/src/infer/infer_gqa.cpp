@@ -36,7 +36,7 @@ struct GQAInference : Inference {
             total += l->saved_per_token(d, cfg_.n_heads, cfg_.head_dim);
         }
 
-        int max_seq = cfg_.max_seq_len > 0 ? std::min(cfg_.max_seq_len, 128) : 128;
+        int max_seq = cfg_.max_seq_len > 0 ? std::min(cfg_.max_seq_len, 512) : 512;
         int infer_n = std::min(512, max_seq);
 
         bufs.alloc_fwd(infer_n, d, ws, hd, V, total);
