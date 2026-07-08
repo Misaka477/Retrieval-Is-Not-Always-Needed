@@ -120,12 +120,90 @@ __global__ void embedding_q4_0f_kernel(const void* weight, const int* idx, float
     }
 }
 
+// Q4_K embedding (4-bit K-quant, 256 elems/block, 144B/block)
+// Matches llama.cpp dequantize_row_q4_K
+static inline __device__ void q4k_get_scale_min(int j, const uint8_t* q, uint8_t* d, uint8_t* m) {
+    if (j < 4) { *d = q[j] & 63; *m = q[j + 4] & 63; }
+    else { *d = (q[j+4] & 0xF) | ((q[j-4] >> 6) << 4); *m = (q[j+4] >> 4) | ((q[j-0] >> 6) << 4); }
+}
+
+__global__ void embedding_q4k_kernel(const void* weight, const int* idx, float* output, int B, int T, int d) {
+    int token = blockIdx.x * blockDim.x + threadIdx.x;
+    if (token >= B * T) return;
+    int tid = idx[token]; if (tid < 0) tid = 0;
+    int n_blocks = d / 256;
+    int per = (n_blocks + blockDim.y - 1) / blockDim.y;
+    int blk_start = threadIdx.y * per;
+    int blk_end = min(blk_start + per, n_blocks);
+    const uint8_t* row = (const uint8_t*)weight + (size_t)tid * n_blocks * 144;
+    float* out_row = output + (size_t)token * d;
+    for (int b = blk_start; b < blk_end; b++) {
+        const uint8_t* blk = row + (size_t)b * 144;
+        float d_all = __half2float(*(const half*)(blk));
+        float dmin  = __half2float(*(const half*)(blk + 2));
+        const uint8_t* scales = blk + 4;
+        const uint8_t* qs = blk + 16;
+        float* y = out_row + b * 256;
+        int is = 0;
+        for (int j = 0; j < 256; j += 64) {
+            uint8_t sc, m;
+            q4k_get_scale_min(is + 0, scales, &sc, &m);
+            float d1 = d_all * sc; float n1 = dmin * m;
+            q4k_get_scale_min(is + 1, scales, &sc, &m);
+            float d2 = d_all * sc; float n2 = dmin * m;
+            for (int l = 0; l < 32; l++) {
+                y[j + l]      = d1 * (qs[l] & 0xF) - n1;
+                y[j + 32 + l] = d2 * (qs[l] >> 4) - n2;
+            }
+            qs += 32; is += 2;
+        }
+    }
+}
+
+// Q6_K embedding (6-bit K-quant, 256 elems/block, 210B/block)
+// Matches llama.cpp dequantize_row_q6_K
+__global__ void embedding_q6k_kernel(const void* weight, const int* idx, float* output, int B, int T, int d) {
+    int token = blockIdx.x * blockDim.x + threadIdx.x;
+    if (token >= B * T) return;
+    int tid = idx[token]; if (tid < 0) tid = 0;
+    int n_blocks = d / 256;
+    int per = (n_blocks + blockDim.y - 1) / blockDim.y;
+    int blk_start = threadIdx.y * per;
+    int blk_end = min(blk_start + per, n_blocks);
+    const uint8_t* row = (const uint8_t*)weight + (size_t)tid * n_blocks * 210;
+    float* out_row = output + (size_t)token * d;
+    for (int b = blk_start; b < blk_end; b++) {
+        const uint8_t* blk = row + (size_t)b * 210;
+        // block_q6_K layout: ql[128] | qh[64] | scales[16] | d[2]
+        float d_all = __half2float(*(const half*)(blk + 208));
+        float* y = out_row + b * 256;
+        // Process in 128-element chunks (2 chunks per block)
+        for (int n = 0; n < 256; n += 128) {
+            const uint8_t* ql = blk + (n/2);       // ql advances by 64 per 128 elements
+            const uint8_t* qh = blk + 128 + (n/4); // qh advances by 32 per 128 elements
+            const int8_t* sc = (const int8_t*)(blk + 192) + (n/16); // sc advances by 8
+            for (int l = 0; l < 32; l++) {
+                int is = l/16;
+                int8_t q1 = (int8_t)((ql[l +  0] & 0xF) | (((qh[l] >> 0) & 3) << 4)) - 32;
+                int8_t q2 = (int8_t)((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32;
+                int8_t q3 = (int8_t)((ql[l +  0]  >> 4) | (((qh[l] >> 4) & 3) << 4)) - 32;
+                int8_t q4 = (int8_t)((ql[l + 32]  >> 4) | (((qh[l] >> 6) & 3) << 4)) - 32;
+                y[n + l +  0] = d_all * sc[is + 0] * q1;
+                y[n + l + 32] = d_all * sc[is + 2] * q2;
+                y[n + l + 64] = d_all * sc[is + 4] * q3;
+                y[n + l + 96] = d_all * sc[is + 6] * q4;
+            }
+        }
+    }
+}
+
 void launch_embedding(
     const void* weight, QuantType quant_type,
     const int* idx, float* output,
     int B, int T, int d, cudaStream_t stream) {
 
     int tokens = B * T;
+
     dim3 block(128, 4);
     dim3 grid((tokens + block.x - 1) / block.x);
 
@@ -138,6 +216,12 @@ void launch_embedding(
             break;
         case QuantType::GGML_Q2_K:
             embedding_q2k_kernel<<<grid, block, 0, stream>>>(weight, idx, output, B, T, d);
+            break;
+        case QuantType::GGML_Q4_K:
+            embedding_q4k_kernel<<<grid, block, 0, stream>>>(weight, idx, output, B, T, d);
+            break;
+        case QuantType::GGML_Q6_K:
+            embedding_q6k_kernel<<<grid, block, 0, stream>>>(weight, idx, output, B, T, d);
             break;
         default:
             embedding_fp32_kernel_v2<<<grid, block, 0, stream>>>((const float*)weight, idx, output, B, T, d);

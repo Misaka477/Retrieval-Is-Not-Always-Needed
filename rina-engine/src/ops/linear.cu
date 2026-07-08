@@ -173,20 +173,8 @@ void launch_linear_dispatch(
         case QuantType::GGML_Q4_K:
         case QuantType::GGML_Q6_K:
         case QuantType::GGML_IQ4_XS:
-        {
-            int n_elems = N * K;
-            float* tmp = get_tmp(n_elems);
-            if (!tmp) {
-                fprintf(stderr,"  launch_linear_dispatch OOM: N=%d K=%d req=%dMB\n",
-                    N, K, (int)((size_t)n_elems*sizeof(float)/1048576));
-                return;
-            }
-            launch_dequant_ggml_blocks(weight_data, tmp, n_elems, quant_type, stream);
-            launch_linear_fp32(input, tmp, output, M, N, K, stream);
-            // Only sync when using malloc'd tmp (g_dequant_tmp is never freed)
-            if (tmp != g_dequant_tmp) { cudaStreamSynchronize(stream); cudaFree(tmp); }
+            rina_launch_mmq(weight_data, (int)quant_type, input, output, M, N, K, stream);
             return;
-        }
         default:
             launch_linear_fp32(input, (const float*)weight_data, output, M, N, K, stream);
             return;

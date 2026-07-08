@@ -23,7 +23,7 @@ extern void build_qkv_fp32_kernel(const float*, const float*, const float*,
 extern void build_qkv_bf16_kernel(const __nv_bfloat16*, const __nv_bfloat16*, const __nv_bfloat16*,
     __nv_bfloat16*, __nv_bfloat16*, __nv_bfloat16*,
     int, int, int, int, int, int, cudaStream_t);
-extern void launch_rope_fp32(float*, const float*, const float*, int, int, int, int, cudaStream_t, int start_pos = 0);
+extern void launch_rope_fp32(float*, const float*, const float*, int, int, int, int, cudaStream_t, int start_pos, int d_rot = 0);
 extern void launch_rope_bf16(__nv_bfloat16*, const float*, const float*, int, int, int, int, cudaStream_t, int start_pos = 0);
 extern void launch_flash_attn_fp32(const float*, const float*, const float*, float*,
     int, int, int, int, int, cudaStream_t);

@@ -21,7 +21,7 @@ void launch_rope_flat_f32cos(
 // ─── fp32 flat RoPE (for Llama/GQA, pairs i,i+half, with start_pos) ───
 void launch_rope_fp32(float* x, const float* cos_table, const float* sin_table,
                       int B, int T, int H, int d, cudaStream_t stream,
-                      int start_pos = 0);
+                      int start_pos = 0, int d_rot = 0);
 
 // ─── fp32 RoPE backward (pairs i,i+half) ───
 void launch_rope_bwd_fp32(float* dx, const float* dout,

@@ -96,8 +96,8 @@ struct GQAInference : Inference {
 
         if (lm_head && lm_head->quant_type != QuantType::GGML_Q6_K) {
             launch_linear_dispatch(lm_head->data, lm_head->quant_type, bufs.fwd.h, bufs.fwd.lm, n, V, d, stream);
-        } else {
-            launch_linear_fp32(bufs.fwd.h, (const float*)wte->data, bufs.fwd.lm, n, V, d, stream);
+        } else if (wte) {
+            launch_linear_dispatch(wte->data, wte->quant_type, bufs.fwd.h, bufs.fwd.lm, n, V, d, stream);
         }
 
         cudaMemcpyAsync(logits, bufs.fwd.lm, n * V * sizeof(float),
