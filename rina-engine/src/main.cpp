@@ -13,6 +13,8 @@
 #include "core/tokenizer.h"
 #include "model.h"
 #include "infer/infer_base.h"
+#include "gguf_rina_bridge.h"
+#include "gguf_llama_runtime.h"
 
 #ifdef RINA_WITH_PYTORCH
 extern "C" void pt_init(const ModelConfig&, const TensorMap&, bool embed=false, bool ln=false,
@@ -95,6 +97,8 @@ int main(int argc, char** argv) {
     bool use_pytorch = false;
     bool use_bf16 = false;
     bool use_gguf = false;
+    bool use_bridge = false;
+    bool legacy_gguf = false;
     std::string kv_quant_mode = "fp32";
     bool pre_rope = false;
     struct stat st;
@@ -136,6 +140,8 @@ int main(int argc, char** argv) {
         else if (strcmp(argv[i], "--bf16") == 0) use_bf16 = true;
         else if (strcmp(argv[i], "--qbits") == 0) { if(i+1<argc) i++; }
         else if (strcmp(argv[i], "--gguf") == 0) use_gguf = true;
+        else if (strcmp(argv[i], "--bridge") == 0) use_bridge = true;
+        else if (strcmp(argv[i], "--legacy-gguf") == 0) legacy_gguf = true;
         else if (strcmp(argv[i], "--kv-quant") == 0) {
             if (i + 1 < argc && argv[i + 1][0] != '-') kv_quant_mode = argv[++i];
             else kv_quant_mode = "q2k_q1v";
@@ -181,7 +187,91 @@ int main(int argc, char** argv) {
     cfg.use_pre_rope_k = pre_rope;
     if (kv_quant_mode != "fp32")
         fprintf(stderr, "  kv-quant: %s\n", kv_quant_mode.c_str());
-    if (use_gguf) {
+    if (use_gguf && !legacy_gguf && !use_bridge) {
+        fprintf(stderr, "Loading GGUF model via llama.cpp CUDA runtime: %s\n", model_path);
+        LlamaRuntime * rt = llama_runtime_load(model_path, std::max(4096, (int)prompt.size() + steps + 16));
+        if (!rt) return 1;
+        std::vector<int32_t> ids(prompt.begin(), prompt.end());
+        if (ids.empty()) ids = {1};
+        fprintf(stderr, "  runtime prefill on %zu tokens\n", ids.size());
+        llama_runtime_reset(rt);
+        float * logits = llama_runtime_eval(rt, ids.data(), (int)ids.size(), false);
+        if (logits) {
+            int vs = llama_runtime_vocab_size(rt);
+            const float * next_logits = logits;
+            fprintf(stderr, "  logits[0..4] = %.4f %.4f %.4f %.4f %.4f\n",
+                    next_logits[0], next_logits[1], next_logits[2], next_logits[3], next_logits[4]);
+        }
+        for (int step = 0; step < steps; step++) {
+            if (!logits) { llama_runtime_free(rt); return 1; }
+            int vs = llama_runtime_vocab_size(rt);
+            const float * next_logits = logits;
+            std::vector<int> gen(ids.begin(), ids.end());
+            int next = sample(next_logits, vs, temp, topk, topp, rep, gen, greedy);
+            free(logits);
+            ids.push_back(next);
+            int32_t next_i32 = next;
+            logits = llama_runtime_eval(rt, &next_i32, 1, false);
+        }
+        if (logits) {
+            free(logits);
+        }
+        if (steps > 0) {
+            printf("tokens:");
+            for (size_t i = prompt.size(); i < ids.size(); i++) printf(" %d", ids[i]);
+            printf("\n");
+        }
+        llama_runtime_free(rt);
+        fprintf(stderr, "llama runtime done\n");
+        return 0;
+    } else if (use_gguf && use_bridge) {
+        fprintf(stderr, "Loading GGUF model via bridge: %s\n", model_path);
+        BridgeModel * bridge_model = new BridgeModel();
+        if (!bridge_load_model(model_path, *bridge_model)) {
+            fprintf(stderr, "Failed to load GGUF model via bridge\n"); return 1;
+        }
+        std::vector<int32_t> ids(prompt.begin(), prompt.end());
+        if (ids.empty()) { ids = {1}; }
+        fprintf(stderr, "  bridge forward on %zu tokens\n", ids.size());
+        float * logits = bridge_forward(*bridge_model, ids.data(), (int)ids.size());
+        if (logits) {
+            int vs = bridge_model->config.vocab_size;
+            const float * next_logits = logits + (ids.size() - 1) * vs;
+            fprintf(stderr, "  logits[0..4] = %.4f %.4f %.4f %.4f %.4f\n",
+                    next_logits[0], next_logits[1], next_logits[2], next_logits[3], next_logits[4]);
+            if (vs > 0) {
+                std::vector<std::pair<float,int>> sorted;
+                for (int i = 0; i < vs && i < 10; i++)
+                    sorted.push_back({next_logits[i], i});
+                std::sort(sorted.begin(), sorted.end(),
+                    [](auto & a, auto & b) { return a.first > b.first; });
+                fprintf(stderr, "  top-5:\n");
+                for (int i = 0; i < 5 && i < (int)sorted.size(); i++)
+                    fprintf(stderr, "    [%d] %f\n", sorted[i].second, sorted[i].first);
+            }
+            free(logits);
+        }
+        for (int step = 0; step < steps; step++) {
+            logits = bridge_forward(*bridge_model, ids.data(), (int)ids.size());
+            if (!logits) { delete bridge_model; return 1; }
+            int vs = bridge_model->config.vocab_size;
+            const float * next_logits = logits + (ids.size() - 1) * vs;
+            std::vector<int> gen(ids.begin(), ids.end());
+            int next = sample(next_logits, vs, temp, topk, topp, rep, gen, greedy);
+            free(logits);
+            ids.push_back(next);
+        }
+        if (steps > 0) {
+            printf("tokens:");
+            for (size_t i = prompt.size(); i < ids.size(); i++) printf(" %d", ids[i]);
+            printf("\n");
+        }
+        fprintf(stderr, "forward done\n");
+        delete bridge_model;
+        fprintf(stderr, "bridge done\n");
+        return 0;
+    } else if (use_gguf) {
+        fprintf(stderr, "WARNING: --legacy-gguf uses the old fake ggml_tensor path and is known to produce incorrect PPL. Use --gguf without --legacy-gguf for the bridge path.\n");
         fprintf(stderr, "Loading GGUF model: %s\n", model_path);
         if (!load_gguf_model(model_path, cfg, weights, 0)) {  // 0 = all layers
             fprintf(stderr, "Failed to load GGUF model: %s\n", model_path); return 1;

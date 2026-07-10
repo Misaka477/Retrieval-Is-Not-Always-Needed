@@ -1,7 +1,13 @@
+// Thin wrapper: calls into the real ggml_cuda library for quantized matmul.
+// Does not include mmq.cuh directly — that would cause duplicate symbols
+// with the ggml_cuda library.
+
 #include "common.cuh"
 #include "ggml-backend.h"
-#include "mmq.cuh"
-#include "quantize.cuh"
+
+// Declared in mmq.cuh (compiled as part of ggml_cuda library)
+void ggml_cuda_mul_mat_q(ggml_backend_cuda_context & ctx, const ggml_tensor * src0,
+    const ggml_tensor * src1, const ggml_tensor * ids, ggml_tensor * dst);
 
 void rina_launch_mmq(
     const void * weight_data, int ggml_type_id,

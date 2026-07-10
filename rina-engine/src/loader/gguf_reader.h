@@ -8,6 +8,8 @@
 constexpr uint32_t GGUF_MAGIC = 0x46554747;  // "GGUF"
 
 // GGML quantization types (relevant subset)
+// Note: this enum values overlap with ggml.h's ggml_type.
+// Avoid including ggml.h when this header is used, or include this header first.
 enum GGMLType : int {
     GGML_TYPE_F32     = 0,
     GGML_TYPE_F16     = 1,
