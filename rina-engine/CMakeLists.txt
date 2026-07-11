@@ -25,11 +25,9 @@ endif()
 
 set(RINA_SRC src/loader.cpp src/main.cpp src/core/layer.cpp src/core/buffer.cpp
     src/core/tape.cpp src/core/layers_fp32.cpp src/core/tokenizer.cpp
-    src/loader_hf.cpp src/loader_gguf.cpp
-    src/loader/gguf_reader.cpp src/loader/loader_shared.cpp
-    src/loader/loader_gqa.cpp src/loader/loader_mla.cpp
+    src/loader_hf.cpp
     src/infer/infer_shared.cpp src/infer/infer_gqa.cpp src/infer/infer_mla.cpp
-    src/gguf_rina_bridge.cpp src/gguf_llama_runtime.cpp)
+    src/gguf_llama_runtime.cpp)
 if(EXISTS ${TORCH_ROOT})
     list(APPEND RINA_SRC src/model_pytorch.cpp)
 endif()
@@ -48,69 +46,12 @@ set(RINA_CUDA_SRC
     src/model_fp32.cu src/model_forward_v2.cu src/model_train_v2.cu
     src/kernels/optimizer_fp32.cu src/kernels/tensor_utils.cu src/train_fp32.cu
     src/arch/gqa/gqa_layer.cu src/arch/ssm/rina_ssm_layer.cu src/arch/mla/rina_mla_layer.cu
-    src/arch/mla/deepseek_mla_layer.cu src/arch/register_layers.cu src/training/train.cu
-    # llama.cpp fused quantized matmul (MMQ) — stub wrapper only; real impl in ggml_cuda
-    src/llama_kernels/rina_mmq_wrapper.cu)
+    src/arch/mla/deepseek_mla_layer.cu src/arch/register_layers.cu src/training/train.cu)
 
 set(RINA_LLAMA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../external/llama.cpp")
 set(RINA_LLAMA_INSTALL "${RINA_LLAMA_DIR}/install_cuda" CACHE PATH "Path to installed CUDA llama.cpp")
 set(RINA_LLAMA_LIB_DIR "${RINA_LLAMA_INSTALL}/lib64")
 set(RINA_LLAMA_RPATH "${RINA_LLAMA_LIB_DIR};/home/aquama/miniconda3/envs/natalia/lib")
-
-# ── ggml core library ──────────────────────────────────────────
-add_library(ggml_core STATIC
-    ${RINA_LLAMA_DIR}/ggml/src/ggml.c
-    ${RINA_LLAMA_DIR}/ggml/src/ggml-alloc.c
-    ${RINA_LLAMA_DIR}/ggml/src/ggml-backend.cpp
-    ${RINA_LLAMA_DIR}/ggml/src/ggml-backend-dl.cpp
-    ${RINA_LLAMA_DIR}/ggml/src/ggml-backend-reg.cpp
-    ${RINA_LLAMA_DIR}/ggml/src/ggml-backend-meta.cpp
-    ${RINA_LLAMA_DIR}/ggml/src/ggml-opt.cpp
-    ${RINA_LLAMA_DIR}/ggml/src/ggml-quants.c
-    ${RINA_LLAMA_DIR}/ggml/src/ggml-threading.cpp
-    ${RINA_LLAMA_DIR}/ggml/src/ggml.cpp
-    ${RINA_LLAMA_DIR}/ggml/src/gguf.cpp
-    ${RINA_LLAMA_DIR}/ggml/src/ggml-cpu/ggml-cpu.c
-    ${RINA_LLAMA_DIR}/ggml/src/ggml-cpu/ggml-cpu.cpp
-    ${RINA_LLAMA_DIR}/ggml/src/ggml-cpu/ops.cpp
-    ${RINA_LLAMA_DIR}/ggml/src/ggml-cpu/quants.c
-    ${RINA_LLAMA_DIR}/ggml/src/ggml-cpu/traits.cpp
-    ${RINA_LLAMA_DIR}/ggml/src/ggml-cpu/binary-ops.cpp
-    ${RINA_LLAMA_DIR}/ggml/src/ggml-cpu/unary-ops.cpp
-    ${RINA_LLAMA_DIR}/ggml/src/ggml-cpu/arch/x86/quants.c
-    ${RINA_LLAMA_DIR}/ggml/src/ggml-cpu/arch/x86/cpu-feats.cpp
-    ${RINA_LLAMA_DIR}/ggml/src/ggml-cpu/vec.cpp)
-target_include_directories(ggml_core PRIVATE ${RINA_LLAMA_DIR}/ggml/src/ggml-cpu)
-target_include_directories(ggml_core PUBLIC ${RINA_LLAMA_DIR}/ggml/include)
-target_include_directories(ggml_core PRIVATE ${RINA_LLAMA_DIR}/ggml/src ${RINA_LLAMA_DIR}/ggml/src/ggml-cpu)
-target_compile_definitions(ggml_core PRIVATE GGML_BUILD GGML_USE_CPU GGML_USE_CUDA _GNU_SOURCE _XOPEN_SOURCE=600
-    GGML_VERSION=\"0.15.3\" GGML_COMMIT=\"unknown\")
-target_link_libraries(ggml_core PUBLIC ${RINA_COMMON_LIBS})
-target_link_libraries(ggml_core PRIVATE m Threads::Threads)
-
-# ── ggml CUDA backend library ──────────────────────────────────
-# Compile upstream ggml-cuda.cu + all kernel files into a single library.
-file(GLOB GGML_CUDA_SRC
-    "${RINA_LLAMA_DIR}/ggml/src/ggml-cuda/*.cu"
-    "${RINA_LLAMA_DIR}/ggml/src/ggml-cuda/template-instances/mmq*.cu"
-    "${RINA_LLAMA_DIR}/ggml/src/ggml-cuda/template-instances/mmf*.cu"
-    "${RINA_LLAMA_DIR}/ggml/src/ggml-cuda/template-instances/fattn-tile*.cu"
-    "${RINA_LLAMA_DIR}/ggml/src/ggml-cuda/template-instances/fattn-mma*.cu"
-    "${RINA_LLAMA_DIR}/ggml/src/ggml-cuda/template-instances/fattn-vec-instance-f16-f16.cu"
-    "${RINA_LLAMA_DIR}/ggml/src/ggml-cuda/template-instances/fattn-vec-instance-q4_0-q4_0.cu"
-    "${RINA_LLAMA_DIR}/ggml/src/ggml-cuda/template-instances/fattn-vec-instance-q8_0-q8_0.cu"
-    "${RINA_LLAMA_DIR}/ggml/src/ggml-cuda/template-instances/fattn-vec-instance-bf16-bf16.cu")
-add_library(ggml_cuda STATIC ${GGML_CUDA_SRC})
-target_include_directories(ggml_cuda PUBLIC ${RINA_LLAMA_DIR}/ggml/include)
-target_include_directories(ggml_cuda PRIVATE ${RINA_LLAMA_DIR}/ggml/src)
-target_include_directories(ggml_cuda PRIVATE ${RINA_LLAMA_DIR}/ggml/src/ggml-cuda)
-target_compile_definitions(ggml_cuda PRIVATE GGML_BUILD _GNU_SOURCE _XOPEN_SOURCE=600
-    GGML_VERSION=\"0.15.3\" GGML_COMMIT=\"unknown\"
-    GGML_CUDA_NO_FA GGML_CUDA_NO_VMM GGML_CUDA_NO_PEER_COPY
-    GGML_CUDA_NO_GRAPHS)
-target_compile_options(ggml_cuda PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:-use_fast_math;-extended-lambda>")
-target_link_libraries(ggml_cuda PUBLIC CUDA::cudart CUDA::cublas)
-target_link_libraries(ggml_cuda PRIVATE ggml_core)
 
 add_library(llama_runtime_core INTERFACE)
 target_include_directories(llama_runtime_core INTERFACE ${RINA_LLAMA_INSTALL}/include)
@@ -123,33 +64,20 @@ target_link_libraries(llama_runtime_core INTERFACE
 
 add_executable(rina_infer ${RINA_SRC} ${RINA_CUDA_SRC})
 target_include_directories(rina_infer PUBLIC src)
-# llama.cpp kernel headers (private to rina_infer only)
-target_include_directories(rina_infer PRIVATE src/llama_kernels)
-target_include_directories(rina_infer PRIVATE ${RINA_LLAMA_DIR}/ggml/include)
-target_include_directories(rina_infer PRIVATE ${RINA_LLAMA_DIR}/include)
-target_include_directories(rina_infer PRIVATE ${RINA_LLAMA_DIR}/ggml/src)
-target_include_directories(rina_infer PRIVATE ${RINA_LLAMA_DIR}/ggml/src/ggml-cuda)
-target_link_libraries(rina_infer PRIVATE ${RINA_COMMON_LIBS} ggml_core ggml_cuda llama_runtime_core)
+target_link_libraries(rina_infer PRIVATE ${RINA_COMMON_LIBS} llama_runtime_core)
 set_target_properties(rina_infer PROPERTIES
     BUILD_RPATH "${RINA_LLAMA_RPATH}"
     INSTALL_RPATH "${RINA_LLAMA_RPATH}")
 
 set(RINA_SRC_NO_MAIN src/loader.cpp src/core/layer.cpp src/core/buffer.cpp
     src/core/tape.cpp src/core/layers_fp32.cpp src/core/tokenizer.cpp
-    src/loader_hf.cpp src/loader_gguf.cpp
-    src/loader/gguf_reader.cpp src/loader/loader_shared.cpp
-    src/loader/loader_gqa.cpp src/loader/loader_mla.cpp
+    src/loader_hf.cpp
     src/infer/infer_shared.cpp src/infer/infer_gqa.cpp src/infer/infer_mla.cpp
-    src/gguf_rina_bridge.cpp src/gguf_llama_runtime.cpp)
+    src/gguf_llama_runtime.cpp)
 
 add_executable(eval_ppl ${RINA_SRC_NO_MAIN} ${RINA_CUDA_SRC} eval/eval_ppl.cpp)
 target_include_directories(eval_ppl PUBLIC src)
-target_include_directories(eval_ppl PRIVATE src/llama_kernels)
-target_include_directories(eval_ppl PRIVATE ${RINA_LLAMA_DIR}/ggml/include)
-target_include_directories(eval_ppl PRIVATE ${RINA_LLAMA_DIR}/include)
-target_include_directories(eval_ppl PRIVATE ${RINA_LLAMA_DIR}/ggml/src)
-target_include_directories(eval_ppl PRIVATE ${RINA_LLAMA_DIR}/ggml/src/ggml-cuda)
-target_link_libraries(eval_ppl PRIVATE ${RINA_COMMON_LIBS} ggml_core ggml_cuda llama_runtime_core)
+target_link_libraries(eval_ppl PRIVATE ${RINA_COMMON_LIBS} llama_runtime_core)
 set_target_properties(eval_ppl PROPERTIES
     BUILD_RPATH "${RINA_LLAMA_RPATH}"
     INSTALL_RPATH "${RINA_LLAMA_RPATH}")
@@ -162,7 +90,7 @@ set(RINA_TEST_CPP src/loader.cpp src/core/layer.cpp src/core/layers_fp32.cpp
 macro(add_rina_test name src)
     add_executable(${name} ${RINA_TEST_CPP} ${RINA_CUDA_SRC} ${src})
     target_include_directories(${name} PUBLIC src)
-    target_link_libraries(${name} PRIVATE ${RINA_COMMON_LIBS} ggml_core ggml_cuda llama_runtime_core)
+    target_link_libraries(${name} PRIVATE ${RINA_COMMON_LIBS} llama_runtime_core)
 endmacro()
 
 add_rina_test(test_train tests/test_train.cu)
@@ -183,7 +111,8 @@ if(EXISTS ${TORCH_ROOT})
         ${TORCH_ROOT}/lib/libtorch.so ${TORCH_ROOT}/lib/libc10.so
         ${TORCH_ROOT}/lib/libtorch_cpu.so ${TORCH_ROOT}/lib/libtorch_cuda.so)
     set_target_properties(rina_infer PROPERTIES
-        BUILD_RPATH "${TORCH_ROOT}/lib;${TORCH_ROOT}/../lib" INSTALL_RPATH "${TORCH_ROOT}/lib;${TORCH_ROOT}/../lib")
+        BUILD_RPATH "${RINA_LLAMA_RPATH};${TORCH_ROOT}/lib;${TORCH_ROOT}/../lib"
+        INSTALL_RPATH "${RINA_LLAMA_RPATH};${TORCH_ROOT}/lib;${TORCH_ROOT}/../lib")
 endif()
 add_rina_test(test_infer tests/test_infer.cu)
 add_rina_test(test_jamba_align tests/test_jamba_align.cu)

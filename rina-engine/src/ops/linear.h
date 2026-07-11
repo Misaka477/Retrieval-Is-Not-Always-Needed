@@ -41,19 +41,6 @@ void launch_pack_q_to_full(
     const float* Q_flat, float* Qf,
     int B, int H, int dh, int T, int total_T, int start_pos, cudaStream_t stream = 0);
 
-// ─── llama.cpp MMQ fused quantized matmul (GPU, no dequant) ───
-void rina_launch_mmq(
-    const void* weight_data, int ggml_type_id,
-    const float* input, float* output,
-    int M, int N, int K,
-    cudaStream_t stream = 0);
-
-void rina_launch_mmvq(
-    const void* weight_data, int ggml_type_id,
-    const float* input, float* output,
-    int N, int K,
-    cudaStream_t stream = 0);
-
 // ─── Global pre-allocated tmp buffer for dequant+matmul ───
 extern float* g_dequant_tmp;
 extern size_t g_dequant_tmp_sz;

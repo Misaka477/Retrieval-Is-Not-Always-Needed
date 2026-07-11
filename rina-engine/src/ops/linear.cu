@@ -2,6 +2,7 @@
 #include "core/kernel_api.h"
 #include "kernels/gemm.cuh"
 #include <cstdio>
+#include <cstdlib>
 
 extern void launch_linear_fp32(const float*, const float*, float*, int, int, int, cudaStream_t);
 
@@ -141,23 +142,6 @@ void launch_linear_dispatch(
     const float* input, float* output,
     int M, int N, int K, cudaStream_t stream) {
 
-    // Use pre-allocated tmp if available (avoids OOM from fragmentation)
-    extern float* g_dequant_tmp;
-    extern size_t g_dequant_tmp_sz;
-
-    auto get_tmp = [&](int n_elems) -> float* {
-        size_t need = (size_t)n_elems * sizeof(float);
-        if (g_dequant_tmp && g_dequant_tmp_sz >= need) {
-            return g_dequant_tmp;
-        }
-        float* p;
-        cudaMalloc(&p, need);
-        return p;
-    };
-    auto free_tmp = [&](float* p) {
-        if (p != g_dequant_tmp) cudaFree(p);
-    };
-
     switch (quant_type) {
         case QuantType::Q4_0:
             launch_linear_q4_fp32(weight_data, input, output, M, N, K, stream);
@@ -173,7 +157,8 @@ void launch_linear_dispatch(
         case QuantType::GGML_Q4_K:
         case QuantType::GGML_Q6_K:
         case QuantType::GGML_IQ4_XS:
-            rina_launch_mmq(weight_data, (int)quant_type, input, output, M, N, K, stream);
+            fprintf(stderr, "RINA native linear: GGML quant type %d is unsupported outside GGUF runtime\n", (int)quant_type);
+            abort();
             return;
         default:
             launch_linear_fp32(input, (const float*)weight_data, output, M, N, K, stream);
@@ -499,9 +484,10 @@ __global__ void q2k_vec_mul_m_kernel(const float* __restrict__ input, const void
 
 // Launch functions
 void launch_dequant_ggml_blocks(const void* src, float* dst, int n_elems, QuantType qt, cudaStream_t stream) {
-    int bs = ggml_block_size(qt);
-    int ts = ggml_type_size(qt);
-    int n_blocks = (n_elems + bs - 1) / bs;
+    (void)src;
+    (void)dst;
+    (void)n_elems;
+    (void)stream;
     switch (qt) {
         case QuantType::GGML_Q4_K:
         case QuantType::GGML_Q6_K:

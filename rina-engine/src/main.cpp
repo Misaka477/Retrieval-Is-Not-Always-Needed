@@ -4,6 +4,7 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <chrono>
 #include <random>
 #include <string>
 #include <vector>
@@ -13,7 +14,6 @@
 #include "core/tokenizer.h"
 #include "model.h"
 #include "infer/infer_base.h"
-#include "gguf_rina_bridge.h"
 #include "gguf_llama_runtime.h"
 
 #ifdef RINA_WITH_PYTORCH
@@ -25,6 +25,11 @@ extern "C" void pt_free();
 
 static std::mt19937 rng;
 static std::string g_prompt_text;
+
+static double now_ms() {
+    using clock = std::chrono::steady_clock;
+    return std::chrono::duration<double, std::milli>(clock::now().time_since_epoch()).count();
+}
 
 static int sample(const float* logits, int n, float temp, int topk, float topp, float rep, const std::vector<int>& gen, bool greedy) {
     if (greedy || temp <= 0) {
@@ -86,19 +91,29 @@ static int sample(const float* logits, int n, float temp, int topk, float topp, 
     return std::max(0, (int)(it - full_cum.begin()) - 1);
 }
 
+static int sample_greedy(const float* logits, int n) {
+    float mx = -1e10f;
+    int argmax = 0;
+    for (int i = 0; i < n; i++) {
+        float v = logits[i];
+        if (v > mx) { mx = v; argmax = i; }
+    }
+    return argmax;
+}
+
 int main(int argc, char** argv) {
     unsigned int seed = 0;
     const char* model_path = nullptr;
     std::vector<int> prompt;
     int steps = 1;
+    int bench_prompt = 0;
+    int bench_reps = 3;
     float temp = 0.8f, topp = 0.9f, rep = 1.1f;
     int topk = 40;
     bool greedy = true;
     bool use_pytorch = false;
     bool use_bf16 = false;
     bool use_gguf = false;
-    bool use_bridge = false;
-    bool legacy_gguf = false;
     std::string kv_quant_mode = "fp32";
     bool pre_rope = false;
     struct stat st;
@@ -123,15 +138,9 @@ int main(int argc, char** argv) {
         else if (strcmp(argv[i], "--prompt") == 0 || strcmp(argv[i], "--text") == 0) {
             g_prompt_text = argv[++i];
         }
-        else if (strcmp(argv[i], "--ids") == 0) {
-            const char* p = argv[++i]; while (*p) {
-                while (*p == ' ') p++;
-                if (*p == 0) break;
-                prompt.push_back(atoi(p));
-                while (*p && *p != ' ') p++;
-            }
-        }
         else if (strcmp(argv[i], "--steps") == 0) steps = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--bench-prompt") == 0) bench_prompt = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--bench-reps") == 0) bench_reps = atoi(argv[++i]);
         else if (strcmp(argv[i], "--temp") == 0) { temp = atof(argv[++i]); greedy = false; }
         else if (strcmp(argv[i], "--topk") == 0) topk = atoi(argv[++i]);
         else if (strcmp(argv[i], "--topp") == 0) topp = atof(argv[++i]);
@@ -140,13 +149,16 @@ int main(int argc, char** argv) {
         else if (strcmp(argv[i], "--bf16") == 0) use_bf16 = true;
         else if (strcmp(argv[i], "--qbits") == 0) { if(i+1<argc) i++; }
         else if (strcmp(argv[i], "--gguf") == 0) use_gguf = true;
-        else if (strcmp(argv[i], "--bridge") == 0) use_bridge = true;
-        else if (strcmp(argv[i], "--legacy-gguf") == 0) legacy_gguf = true;
         else if (strcmp(argv[i], "--kv-quant") == 0) {
             if (i + 1 < argc && argv[i + 1][0] != '-') kv_quant_mode = argv[++i];
             else kv_quant_mode = "q2k_q1v";
         }
         else if (strcmp(argv[i], "--pre-rope") == 0) pre_rope = true;
+        else {
+            fprintf(stderr, "Unknown argument: %s\n", argv[i]);
+            fprintf(stderr, "Usage: rina_infer --model model.rinn|model.gguf [--gguf] [--prompt text|--ids ids] [--steps N]\n");
+            return 1;
+        }
     }
     if (seed) rng.seed(seed);
 
@@ -167,16 +179,20 @@ int main(int argc, char** argv) {
             fprintf(stderr, "Error: use --prompt \"text\" or --ids \"id id id\"\n");
             return 1;
         }
-        // Try C++ tokenizer first
-        if (rinn.tokenizer.vocab_size() > 0) {
-            prompt = rinn.tokenizer.encode(g_prompt_text);
-            fprintf(stderr, "  prompt=\"%s\" → %zu tokens\n", g_prompt_text.c_str(), prompt.size());
+        if (use_gguf) {
+            fprintf(stderr, "  gguf prompt text will be tokenized by llama.cpp runtime\n");
         } else {
-            fprintf(stderr, "  warning: no tokenizer found, use --ids instead\n");
+        // Try C++ tokenizer first
+            if (rinn.tokenizer.vocab_size() > 0) {
+                prompt = rinn.tokenizer.encode(g_prompt_text);
+                fprintf(stderr, "  prompt=\"%s\" -> %zu tokens\n", g_prompt_text.c_str(), prompt.size());
+            } else {
+                fprintf(stderr, "  warning: no tokenizer found, use --ids instead\n");
+            }
+            fprintf(stderr, "  tokens:");
+            for (int t : prompt) fprintf(stderr, " %d", t);
+            fprintf(stderr, "\n");
         }
-        fprintf(stderr, "  tokens:");
-        for (int t : prompt) fprintf(stderr, " %d", t);
-        fprintf(stderr, "\n");
     }
 
     ModelConfig cfg;
@@ -187,95 +203,99 @@ int main(int argc, char** argv) {
     cfg.use_pre_rope_k = pre_rope;
     if (kv_quant_mode != "fp32")
         fprintf(stderr, "  kv-quant: %s\n", kv_quant_mode.c_str());
-    if (use_gguf && !legacy_gguf && !use_bridge) {
+    if (use_gguf) {
         fprintf(stderr, "Loading GGUF model via llama.cpp CUDA runtime: %s\n", model_path);
+        const double t_load0 = now_ms();
         LlamaRuntime * rt = llama_runtime_load(model_path, std::max(4096, (int)prompt.size() + steps + 16));
         if (!rt) return 1;
+        const double t_load_ms = now_ms() - t_load0;
+        if (prompt.empty() && !g_prompt_text.empty()) {
+            int n_llama_tokens = 0;
+            int32_t * llama_tokens = llama_runtime_tokenize_text(rt, g_prompt_text.c_str(), &n_llama_tokens, true, true);
+            if (!llama_tokens || n_llama_tokens <= 0) {
+                fprintf(stderr, "llama runtime: failed to tokenize prompt text\n");
+                free(llama_tokens);
+                llama_runtime_free(rt);
+                return 1;
+            }
+            prompt.assign(llama_tokens, llama_tokens + n_llama_tokens);
+            free(llama_tokens);
+            fprintf(stderr, "  gguf prompt=\"%s\" -> %zu tokens\n", g_prompt_text.c_str(), prompt.size());
+            fprintf(stderr, "  tokens:");
+            for (int t : prompt) fprintf(stderr, " %d", t);
+            fprintf(stderr, "\n");
+        }
+        if (bench_prompt > 0) {
+            std::vector<int32_t> bench_ids(bench_prompt, 1);
+            if (!prompt.empty()) {
+                for (int i = 0; i < bench_prompt; i++) bench_ids[i] = prompt[(size_t)i % prompt.size()];
+            }
+            float * warmup = llama_runtime_eval(rt, bench_ids.data(), bench_prompt, false);
+            free(warmup);
+            double total_ms = 0.0;
+            for (int rep_i = 0; rep_i < std::max(1, bench_reps); rep_i++) {
+                llama_runtime_reset(rt);
+                const double t0 = now_ms();
+                float * out = llama_runtime_eval(rt, bench_ids.data(), bench_prompt, false);
+                total_ms += now_ms() - t0;
+                free(out);
+            }
+            LlamaRuntimePerf perf = llama_runtime_perf(rt);
+            const int reps = std::max(1, bench_reps);
+            const double avg_ms = total_ms / reps;
+            const double tps = avg_ms > 0.0 ? (double)bench_prompt * 1000.0 / avg_ms : 0.0;
+            fprintf(stderr, "RINA_PROMPT_BENCH {\"load_ms\":%.3f,\"prompt_tokens\":%d,\"repetitions\":%d,\"avg_ms\":%.3f,\"tokens_per_second\":%.3f,\"llama_prompt_eval_ms\":%.3f,\"llama_prompt_tokens\":%d,\"llama_graph_reused\":%d}\n",
+                    t_load_ms, bench_prompt, reps, avg_ms, tps, perf.prompt_eval_ms, perf.prompt_tokens, perf.graph_reused);
+            llama_runtime_free(rt);
+            return 0;
+        }
         std::vector<int32_t> ids(prompt.begin(), prompt.end());
         if (ids.empty()) ids = {1};
+        const size_t prefill_tokens = ids.size();
         fprintf(stderr, "  runtime prefill on %zu tokens\n", ids.size());
         llama_runtime_reset(rt);
-        float * logits = llama_runtime_eval(rt, ids.data(), (int)ids.size(), false);
+        const double t_prefill0 = now_ms();
+        const float * logits = llama_runtime_eval_last_view(rt, ids.data(), (int)ids.size());
+        const double t_prefill_ms = now_ms() - t_prefill0;
         if (logits) {
             int vs = llama_runtime_vocab_size(rt);
             const float * next_logits = logits;
             fprintf(stderr, "  logits[0..4] = %.4f %.4f %.4f %.4f %.4f\n",
                     next_logits[0], next_logits[1], next_logits[2], next_logits[3], next_logits[4]);
         }
+        double t_sample_ms = 0.0;
+        double t_decode_ms = 0.0;
+        std::vector<int> gen_history(ids.begin(), ids.end());
         for (int step = 0; step < steps; step++) {
             if (!logits) { llama_runtime_free(rt); return 1; }
             int vs = llama_runtime_vocab_size(rt);
             const float * next_logits = logits;
-            std::vector<int> gen(ids.begin(), ids.end());
-            int next = sample(next_logits, vs, temp, topk, topp, rep, gen, greedy);
-            free(logits);
+            const double t_sample0 = now_ms();
+            int next = (greedy || temp <= 0.0f)
+                ? sample_greedy(next_logits, vs)
+                : sample(next_logits, vs, temp, topk, topp, rep, gen_history, false);
+            t_sample_ms += now_ms() - t_sample0;
             ids.push_back(next);
+            gen_history.push_back(next);
             int32_t next_i32 = next;
-            logits = llama_runtime_eval(rt, &next_i32, 1, false);
-        }
-        if (logits) {
-            free(logits);
+            const double t_decode0 = now_ms();
+            logits = llama_runtime_eval_last_view(rt, &next_i32, 1);
+            t_decode_ms += now_ms() - t_decode0;
         }
         if (steps > 0) {
             printf("tokens:");
             for (size_t i = prompt.size(); i < ids.size(); i++) printf(" %d", ids[i]);
             printf("\n");
         }
+        LlamaRuntimePerf perf = llama_runtime_perf(rt);
         llama_runtime_free(rt);
+        const double prefill_tps = t_prefill_ms > 0.0 ? (double)prefill_tokens * 1000.0 / t_prefill_ms : 0.0;
+        const double decode_tps = t_decode_ms > 0.0 ? (double)steps * 1000.0 / t_decode_ms : 0.0;
+        fprintf(stderr, "RINA_INFER_PERF {\"load_ms\":%.3f,\"prefill_ms\":%.3f,\"prefill_tokens\":%zu,\"prefill_tokens_per_second\":%.3f,\"decode_ms\":%.3f,\"decode_tokens\":%d,\"decode_tokens_per_second\":%.3f,\"sample_ms\":%.3f,\"llama_prompt_eval_ms\":%.3f,\"llama_prompt_tokens\":%d,\"llama_eval_ms\":%.3f,\"llama_eval_tokens\":%d,\"llama_graph_reused\":%d}\n",
+                t_load_ms, t_prefill_ms, prefill_tokens, prefill_tps, t_decode_ms, steps, decode_tps, t_sample_ms,
+                perf.prompt_eval_ms, perf.prompt_tokens, perf.eval_ms, perf.eval_tokens, perf.graph_reused);
         fprintf(stderr, "llama runtime done\n");
         return 0;
-    } else if (use_gguf && use_bridge) {
-        fprintf(stderr, "Loading GGUF model via bridge: %s\n", model_path);
-        BridgeModel * bridge_model = new BridgeModel();
-        if (!bridge_load_model(model_path, *bridge_model)) {
-            fprintf(stderr, "Failed to load GGUF model via bridge\n"); return 1;
-        }
-        std::vector<int32_t> ids(prompt.begin(), prompt.end());
-        if (ids.empty()) { ids = {1}; }
-        fprintf(stderr, "  bridge forward on %zu tokens\n", ids.size());
-        float * logits = bridge_forward(*bridge_model, ids.data(), (int)ids.size());
-        if (logits) {
-            int vs = bridge_model->config.vocab_size;
-            const float * next_logits = logits + (ids.size() - 1) * vs;
-            fprintf(stderr, "  logits[0..4] = %.4f %.4f %.4f %.4f %.4f\n",
-                    next_logits[0], next_logits[1], next_logits[2], next_logits[3], next_logits[4]);
-            if (vs > 0) {
-                std::vector<std::pair<float,int>> sorted;
-                for (int i = 0; i < vs && i < 10; i++)
-                    sorted.push_back({next_logits[i], i});
-                std::sort(sorted.begin(), sorted.end(),
-                    [](auto & a, auto & b) { return a.first > b.first; });
-                fprintf(stderr, "  top-5:\n");
-                for (int i = 0; i < 5 && i < (int)sorted.size(); i++)
-                    fprintf(stderr, "    [%d] %f\n", sorted[i].second, sorted[i].first);
-            }
-            free(logits);
-        }
-        for (int step = 0; step < steps; step++) {
-            logits = bridge_forward(*bridge_model, ids.data(), (int)ids.size());
-            if (!logits) { delete bridge_model; return 1; }
-            int vs = bridge_model->config.vocab_size;
-            const float * next_logits = logits + (ids.size() - 1) * vs;
-            std::vector<int> gen(ids.begin(), ids.end());
-            int next = sample(next_logits, vs, temp, topk, topp, rep, gen, greedy);
-            free(logits);
-            ids.push_back(next);
-        }
-        if (steps > 0) {
-            printf("tokens:");
-            for (size_t i = prompt.size(); i < ids.size(); i++) printf(" %d", ids[i]);
-            printf("\n");
-        }
-        fprintf(stderr, "forward done\n");
-        delete bridge_model;
-        fprintf(stderr, "bridge done\n");
-        return 0;
-    } else if (use_gguf) {
-        fprintf(stderr, "WARNING: --legacy-gguf uses the old fake ggml_tensor path and is known to produce incorrect PPL. Use --gguf without --legacy-gguf for the bridge path.\n");
-        fprintf(stderr, "Loading GGUF model: %s\n", model_path);
-        if (!load_gguf_model(model_path, cfg, weights, 0)) {  // 0 = all layers
-            fprintf(stderr, "Failed to load GGUF model: %s\n", model_path); return 1;
-        }
     } else {
         // Auto-detect: HF directory (has config.json) vs .rinn file/directory
         if (::stat(model_path, &st) == 0) {

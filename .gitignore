@@ -8,6 +8,9 @@ checkpoints/
 nanoGPT/
 models/
 data/
+!rina-engine/eval/data/
+!rina-engine/eval/data/wikitext-2-raw/
+!rina-engine/eval/data/wikitext-2-raw/wiki.test.raw
 logs/
 hf_cache/
 paper/

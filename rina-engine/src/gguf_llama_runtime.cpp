@@ -3,6 +3,7 @@
 #include <llama.h>
 
 #include <algorithm>
+#include <limits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -50,14 +51,14 @@ LlamaRuntime * llama_runtime_load(const char * path, int n_ctx) {
 
     llama_context_params cparams = llama_context_default_params();
     cparams.n_ctx = n_ctx > 0 ? (uint32_t)n_ctx : 4096;
-    cparams.n_batch = cparams.n_ctx;
+    cparams.n_batch = std::max<uint32_t>(cparams.n_ctx, 512);
     cparams.n_ubatch = std::min<uint32_t>(cparams.n_ctx, 512);
     cparams.n_seq_max = 1;
     cparams.n_threads = 4;
     cparams.n_threads_batch = 4;
     cparams.offload_kqv = true;
     cparams.op_offload = true;
-    cparams.no_perf = true;
+    cparams.no_perf = false;
     cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
 
     llama_context * ctx = llama_init_from_model(model, cparams);
@@ -88,44 +89,129 @@ int llama_runtime_vocab_size(const LlamaRuntime * runtime) {
     return runtime ? runtime->vocab_size : 0;
 }
 
-float * llama_runtime_forward(LlamaRuntime * runtime, const int32_t * tokens, int n_tokens) {
+int llama_runtime_context_size(const LlamaRuntime * runtime) {
+    return runtime ? runtime->n_ctx : 0;
+}
+
+LlamaRuntimePerf llama_runtime_perf(const LlamaRuntime * runtime) {
+    LlamaRuntimePerf result;
+    if (!runtime || !runtime->ctx) return result;
+    llama_perf_context_data data = llama_perf_context(runtime->ctx);
+    result.prompt_eval_ms = data.t_p_eval_ms;
+    result.eval_ms = data.t_eval_ms;
+    result.prompt_tokens = data.n_p_eval;
+    result.eval_tokens = data.n_eval;
+    result.graph_reused = data.n_reused;
+    return result;
+}
+
+bool llama_runtime_add_bos(const LlamaRuntime * runtime) {
+    if (!runtime || !runtime->model) return false;
+    return llama_vocab_get_add_bos(llama_model_get_vocab(runtime->model));
+}
+
+int32_t llama_runtime_bos_token(const LlamaRuntime * runtime) {
+    if (!runtime || !runtime->model) return -1;
+    return llama_vocab_bos(llama_model_get_vocab(runtime->model));
+}
+
+int32_t * llama_runtime_tokenize_text(LlamaRuntime * runtime, const char * text, int * n_tokens, bool add_special, bool parse_special) {
+    if (n_tokens) *n_tokens = 0;
+    if (!runtime || !runtime->model || !text || !n_tokens) return nullptr;
+
+    const size_t text_len = strlen(text);
+    if (text_len > (size_t)std::numeric_limits<int32_t>::max()) {
+        fprintf(stderr, "llama runtime: text too large to tokenize\n");
+        return nullptr;
+    }
+
+    const llama_vocab * vocab = llama_model_get_vocab(runtime->model);
+    int32_t count = llama_tokenize(vocab, text, (int32_t)text_len, nullptr, 0, add_special, parse_special);
+    if (count == std::numeric_limits<int32_t>::min()) {
+        fprintf(stderr, "llama runtime: tokenization overflow\n");
+        return nullptr;
+    }
+    if (count < 0) count = -count;
+    if (count <= 0) return nullptr;
+
+    int32_t * tokens = (int32_t *)malloc((size_t)count * sizeof(int32_t));
+    if (!tokens) return nullptr;
+
+    int32_t check = llama_tokenize(vocab, text, (int32_t)text_len, tokens, count, add_special, parse_special);
+    if (check < 0 || check > count) {
+        fprintf(stderr, "llama runtime: tokenization failed: %d\n", check);
+        free(tokens);
+        return nullptr;
+    }
+
+    *n_tokens = check;
+    return tokens;
+}
+
+float * llama_runtime_forward_select(LlamaRuntime * runtime, const int32_t * tokens, int n_tokens, int logits_from, int n_logits) {
     if (!runtime || !runtime->ctx || !tokens || n_tokens <= 0) return nullptr;
     if (n_tokens > runtime->n_ctx) {
         fprintf(stderr, "llama runtime: n_tokens=%d exceeds n_ctx=%d\n", n_tokens, runtime->n_ctx);
         return nullptr;
     }
-
-    llama_memory_clear(llama_get_memory(runtime->ctx), true);
-
-    llama_batch batch = llama_batch_init(n_tokens, 0, 1);
-    for (int i = 0; i < n_tokens; i++) {
-        batch.token[i] = tokens[i];
-        batch.pos[i] = i;
-        batch.n_seq_id[i] = 1;
-        batch.seq_id[i][0] = 0;
-        batch.logits[i] = 1;
-    }
-    batch.n_tokens = n_tokens;
-
-    int rc = llama_decode(runtime->ctx, batch);
-    llama_batch_free(batch);
-    if (rc != 0) {
-        fprintf(stderr, "llama runtime: decode failed: %d\n", rc);
+    if (logits_from < 0 || n_logits <= 0 || logits_from + n_logits > n_tokens) {
+        fprintf(stderr, "llama runtime: invalid logits range from=%d n=%d tokens=%d\n", logits_from, n_logits, n_tokens);
         return nullptr;
     }
 
-    const size_t logits_size = (size_t)n_tokens * runtime->vocab_size * sizeof(float);
+    llama_memory_clear(llama_get_memory(runtime->ctx), true);
+
+    const size_t logits_size = (size_t)n_logits * runtime->vocab_size * sizeof(float);
     float * result = (float *)malloc(logits_size);
     if (!result) return nullptr;
-    for (int i = 0; i < n_tokens; i++) {
-        const float * row = llama_get_logits_ith(runtime->ctx, i);
-        if (!row) {
+    int out_row = 0;
+
+    const int n_batch = std::min(n_tokens, 256);
+    llama_batch batch = llama_batch_init(n_batch, 0, 1);
+    for (int start = 0; start < n_tokens; start += n_batch) {
+        const int batch_size = std::min(n_batch, n_tokens - start);
+        batch.n_tokens = batch_size;
+        for (int i = 0; i < batch_size; i++) {
+            batch.token[i] = tokens[start + i];
+            batch.pos[i] = start + i;
+            batch.n_seq_id[i] = 1;
+            batch.seq_id[i][0] = 0;
+            const int pos = start + i;
+            batch.logits[i] = pos >= logits_from && pos < logits_from + n_logits;
+        }
+
+        int rc = llama_decode(runtime->ctx, batch);
+        if (rc != 0) {
+            fprintf(stderr, "llama runtime: decode failed: %d\n", rc);
+            llama_batch_free(batch);
             free(result);
             return nullptr;
         }
-        memcpy(result + (size_t)i * runtime->vocab_size, row, (size_t)runtime->vocab_size * sizeof(float));
+
+        for (int i = 0; i < batch_size; i++) {
+            const int pos = start + i;
+            if (pos < logits_from || pos >= logits_from + n_logits) continue;
+            const float * row = llama_get_logits_ith(runtime->ctx, i);
+            if (!row) {
+                llama_batch_free(batch);
+                free(result);
+                return nullptr;
+            }
+            memcpy(result + (size_t)out_row * runtime->vocab_size, row, (size_t)runtime->vocab_size * sizeof(float));
+            out_row++;
+        }
+    }
+    llama_batch_free(batch);
+    if (out_row != n_logits) {
+        fprintf(stderr, "llama runtime: copied %d logits rows, expected %d\n", out_row, n_logits);
+        free(result);
+        return nullptr;
     }
     return result;
+}
+
+float * llama_runtime_forward(LlamaRuntime * runtime, const int32_t * tokens, int n_tokens) {
+    return llama_runtime_forward_select(runtime, tokens, n_tokens, 0, n_tokens);
 }
 
 void llama_runtime_reset(LlamaRuntime * runtime) {
@@ -174,6 +260,35 @@ float * llama_runtime_eval(LlamaRuntime * runtime, const int32_t * tokens, int n
         memcpy(result + (size_t)i * runtime->vocab_size, row, (size_t)runtime->vocab_size * sizeof(float));
     }
     return result;
+}
+
+const float * llama_runtime_eval_last_view(LlamaRuntime * runtime, const int32_t * tokens, int n_tokens) {
+    if (!runtime || !runtime->ctx || !tokens || n_tokens <= 0) return nullptr;
+    if (runtime->n_past + n_tokens > runtime->n_ctx) {
+        fprintf(stderr, "llama runtime: n_past=%d n_tokens=%d exceeds n_ctx=%d\n",
+                runtime->n_past, n_tokens, runtime->n_ctx);
+        return nullptr;
+    }
+
+    llama_batch batch = llama_batch_init(n_tokens, 0, 1);
+    for (int i = 0; i < n_tokens; i++) {
+        batch.token[i] = tokens[i];
+        batch.pos[i] = runtime->n_past + i;
+        batch.n_seq_id[i] = 1;
+        batch.seq_id[i][0] = 0;
+        batch.logits[i] = i == n_tokens - 1;
+    }
+    batch.n_tokens = n_tokens;
+
+    int rc = llama_decode(runtime->ctx, batch);
+    llama_batch_free(batch);
+    if (rc != 0) {
+        fprintf(stderr, "llama runtime: decode failed: %d\n", rc);
+        return nullptr;
+    }
+    runtime->n_past += n_tokens;
+
+    return llama_get_logits_ith(runtime->ctx, -1);
 }
 
 float * llama_runtime_last_logits(LlamaRuntime * runtime) {

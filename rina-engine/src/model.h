@@ -10,10 +10,6 @@ bool load_model(const char* path, ModelConfig& cfg, TensorMap& tensors);
 bool load_hf_model(const char* dir_path, ModelConfig& cfg, TensorMap& tensors,
                    int quant_bits = 4);
 
-// GGUF model loader: reads GGUF format (llama.cpp ecosystem)
-// max_layers: limit to first N layers (0 = all)
-bool load_gguf_model(const char* path, ModelConfig& cfg, TensorMap& tensors, int max_layers = 0);
-
 void model_forward_fp32(const ModelConfig& cfg, const TensorMap& w,
     const int* ids, float* logits, int B, int T, cudaStream_t stream,
     int start_pos = 0);
