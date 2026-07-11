@@ -22,6 +22,9 @@ bool llama_runtime_add_bos(const LlamaRuntime * runtime);
 int32_t llama_runtime_bos_token(const LlamaRuntime * runtime);
 float * llama_runtime_forward(LlamaRuntime * runtime, const int32_t * tokens, int n_tokens);
 float * llama_runtime_forward_select(LlamaRuntime * runtime, const int32_t * tokens, int n_tokens, int logits_from, int n_logits);
+bool llama_runtime_score_select(LlamaRuntime * runtime, const int32_t * tokens, int n_tokens,
+                                int logits_from, int n_logits, const int32_t * targets,
+                                double * total_log_prob, double * total_log_prob_sq);
 int32_t * llama_runtime_tokenize_text(LlamaRuntime * runtime, const char * text, int * n_tokens, bool add_special, bool parse_special);
 void llama_runtime_reset(LlamaRuntime * runtime);
 float * llama_runtime_eval(LlamaRuntime * runtime, const int32_t * tokens, int n_tokens, bool all_logits);

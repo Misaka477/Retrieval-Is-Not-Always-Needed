@@ -183,6 +183,7 @@ int main(int argc, char** argv) {
 
         const int n_chunk = stride > 0 ? std::max(0, (N - ctx + stride - 1) / stride) : N / ctx;
         fprintf(stderr, "  llama-style ppl: chunks=%d ctx=%d stride=%d score_from=%d\n", n_chunk, ctx, stride, score_from);
+        const bool verbose_chunks = getenv("RINA_PPL_VERBOSE") != nullptr;
         const double t_runtime0 = now_ms();
         for (int i = 0; i < n_chunk; i++) {
             const int start = stride > 0 ? i * stride : i * ctx;
@@ -191,20 +192,36 @@ int main(int argc, char** argv) {
 
             std::vector<int32_t> ids(tokens.begin() + start, tokens.begin() + end);
             if (add_bos && !ids.empty()) ids[0] = bos;
-            fprintf(stderr,"  forward: T=%d start=%d\n", ctx, start);
+            if (verbose_chunks || i == 0 || (i + 1) == n_chunk || (i + 1) % 50 == 0) {
+                fprintf(stderr,"  forward: chunk=%d/%d T=%d start=%d\n", i + 1, n_chunk, ctx, start);
+            }
 
             const int n_score = ctx - score_from - 1;
+            std::vector<int32_t> targets(n_score);
+            for (int j = 0; j < n_score; j++) {
+                targets[j] = tokens[start + score_from + j + 1];
+            }
             const double t_eval0 = now_ms();
-            float * out = dump_logits
-                ? llama_runtime_forward(llama_rt, ids.data(), ctx)
-                : llama_runtime_forward_select(llama_rt, ids.data(), ctx, score_from, n_score);
+            float * out = nullptr;
+            bool scored = false;
+            if (dump_logits) {
+                out = llama_runtime_forward(llama_rt, ids.data(), ctx);
+            } else {
+                scored = llama_runtime_score_select(llama_rt, ids.data(), ctx, score_from, n_score,
+                                                    targets.data(), &total_ll, &total_ll2);
+            }
             runtime_eval_ms += now_ms() - t_eval0;
-            if (!out) return 1;
-            if (dump_logits) fwrite(out, sizeof(float), (size_t)ctx * cfg.vocab_size, dump_logits);
-            accumulate_ppl(dump_logits ? out + (size_t)score_from * cfg.vocab_size : out, cfg.vocab_size,
-                           tokens.data() + start + score_from, n_score,
-                           total_ll, total_ll2, count);
-            free(out);
+            if (dump_logits) {
+                if (!out) return 1;
+                fwrite(out, sizeof(float), (size_t)ctx * cfg.vocab_size, dump_logits);
+                accumulate_ppl(out + (size_t)score_from * cfg.vocab_size, cfg.vocab_size,
+                               tokens.data() + start + score_from, n_score,
+                               total_ll, total_ll2, count);
+                free(out);
+            } else {
+                if (!scored) return 1;
+                count += n_score;
+            }
             chunks_done++;
         }
         const double wall_ms = now_ms() - t_runtime0;

@@ -3,10 +3,13 @@
 #include <llama.h>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
+#include <vector>
 
 static void llama_runtime_log_callback(enum ggml_log_level level, const char * text, void * user_data) {
     (void)level;
@@ -148,6 +151,32 @@ int32_t * llama_runtime_tokenize_text(LlamaRuntime * runtime, const char * text,
     return tokens;
 }
 
+static double llama_runtime_lse(const float * row, int n) {
+    double mx = -INFINITY;
+    double sum = 0.0;
+    for (int i = 0; i < n; i++) {
+        const double v = row[i];
+        if (v > mx) {
+            sum = sum * exp(mx - v) + 1.0;
+            mx = v;
+        } else {
+            sum += exp(v - mx);
+        }
+    }
+    return mx + log(sum);
+}
+
+static int llama_runtime_score_threads() {
+    static int threads = []() {
+        const char * env = getenv("RINA_PPL_THREADS");
+        if (env && atoi(env) > 0) return atoi(env);
+        unsigned int hw = std::thread::hardware_concurrency();
+        if (hw == 0) hw = 4;
+        return (int)std::min<unsigned int>(hw, 16);
+    }();
+    return threads;
+}
+
 float * llama_runtime_forward_select(LlamaRuntime * runtime, const int32_t * tokens, int n_tokens, int logits_from, int n_logits) {
     if (!runtime || !runtime->ctx || !tokens || n_tokens <= 0) return nullptr;
     if (n_tokens > runtime->n_ctx) {
@@ -208,6 +237,98 @@ float * llama_runtime_forward_select(LlamaRuntime * runtime, const int32_t * tok
         return nullptr;
     }
     return result;
+}
+
+bool llama_runtime_score_select(LlamaRuntime * runtime, const int32_t * tokens, int n_tokens,
+                                int logits_from, int n_logits, const int32_t * targets,
+                                double * total_log_prob, double * total_log_prob_sq) {
+    if (!runtime || !runtime->ctx || !tokens || !targets || !total_log_prob || !total_log_prob_sq || n_tokens <= 0) return false;
+    if (n_tokens > runtime->n_ctx) {
+        fprintf(stderr, "llama runtime: n_tokens=%d exceeds n_ctx=%d\n", n_tokens, runtime->n_ctx);
+        return false;
+    }
+    if (logits_from < 0 || n_logits <= 0 || logits_from + n_logits > n_tokens) {
+        fprintf(stderr, "llama runtime: invalid score range from=%d n=%d tokens=%d\n", logits_from, n_logits, n_tokens);
+        return false;
+    }
+
+    llama_memory_clear(llama_get_memory(runtime->ctx), true);
+
+    int scored = 0;
+    const int n_batch = std::min(n_tokens, 256);
+    llama_batch batch = llama_batch_init(n_batch, 0, 1);
+    for (int start = 0; start < n_tokens; start += n_batch) {
+        const int batch_size = std::min(n_batch, n_tokens - start);
+        batch.n_tokens = batch_size;
+        for (int i = 0; i < batch_size; i++) {
+            batch.token[i] = tokens[start + i];
+            batch.pos[i] = start + i;
+            batch.n_seq_id[i] = 1;
+            batch.seq_id[i][0] = 0;
+            const int pos = start + i;
+            batch.logits[i] = pos >= logits_from && pos < logits_from + n_logits;
+        }
+
+        int rc = llama_decode(runtime->ctx, batch);
+        if (rc != 0) {
+            fprintf(stderr, "llama runtime: decode failed: %d\n", rc);
+            llama_batch_free(batch);
+            return false;
+        }
+
+        std::vector<const float *> rows;
+        std::vector<int> row_targets;
+        rows.reserve(batch_size);
+        row_targets.reserve(batch_size);
+        for (int i = 0; i < batch_size; i++) {
+            const int pos = start + i;
+            if (pos < logits_from || pos >= logits_from + n_logits) continue;
+            const int target = targets[pos - logits_from];
+            if (target < 0 || target >= runtime->vocab_size) {
+                fprintf(stderr, "llama runtime: target token %d outside vocab %d\n", target, runtime->vocab_size);
+                llama_batch_free(batch);
+                return false;
+            }
+            const float * row = llama_get_logits_ith(runtime->ctx, i);
+            if (!row) {
+                llama_batch_free(batch);
+                return false;
+            }
+            rows.push_back(row);
+            row_targets.push_back(target);
+        }
+
+        const int n_rows = (int)rows.size();
+        std::vector<double> log_probs(n_rows, 0.0);
+        const int n_threads = std::max(1, std::min(llama_runtime_score_threads(), n_rows));
+        if (n_threads == 1) {
+            for (int r = 0; r < n_rows; r++) {
+                log_probs[r] = (double)rows[r][row_targets[r]] - llama_runtime_lse(rows[r], runtime->vocab_size);
+            }
+        } else {
+            std::vector<std::thread> workers;
+            workers.reserve(n_threads);
+            for (int t = 0; t < n_threads; t++) {
+                workers.emplace_back([&, t]() {
+                    for (int r = t; r < n_rows; r += n_threads) {
+                        log_probs[r] = (double)rows[r][row_targets[r]] - llama_runtime_lse(rows[r], runtime->vocab_size);
+                    }
+                });
+            }
+            for (auto & worker : workers) worker.join();
+        }
+        for (double log_prob : log_probs) {
+            *total_log_prob += log_prob;
+            *total_log_prob_sq += log_prob * log_prob;
+        }
+        scored += n_rows;
+    }
+    llama_batch_free(batch);
+    if (scored != n_logits) {
+        fprintf(stderr, "llama runtime: scored %d logits rows, expected %d\n", scored, n_logits);
+        return false;
+    }
+    return true;
 }
 
 float * llama_runtime_forward(LlamaRuntime * runtime, const int32_t * tokens, int n_tokens) {
