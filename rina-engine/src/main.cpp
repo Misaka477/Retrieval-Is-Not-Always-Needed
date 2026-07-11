@@ -108,6 +108,7 @@ int main(int argc, char** argv) {
     int steps = 1;
     int bench_prompt = 0;
     int bench_reps = 3;
+    int requested_ctx = 0;
     float temp = 0.8f, topp = 0.9f, rep = 1.1f;
     int topk = 40;
     bool greedy = true;
@@ -139,6 +140,7 @@ int main(int argc, char** argv) {
             g_prompt_text = argv[++i];
         }
         else if (strcmp(argv[i], "--steps") == 0) steps = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--ctx") == 0 || strcmp(argv[i], "--context") == 0) requested_ctx = atoi(argv[++i]);
         else if (strcmp(argv[i], "--bench-prompt") == 0) bench_prompt = atoi(argv[++i]);
         else if (strcmp(argv[i], "--bench-reps") == 0) bench_reps = atoi(argv[++i]);
         else if (strcmp(argv[i], "--temp") == 0) { temp = atof(argv[++i]); greedy = false; }
@@ -156,7 +158,7 @@ int main(int argc, char** argv) {
         else if (strcmp(argv[i], "--pre-rope") == 0) pre_rope = true;
         else {
             fprintf(stderr, "Unknown argument: %s\n", argv[i]);
-            fprintf(stderr, "Usage: rina_infer --model model.rinn|model.gguf [--gguf] [--prompt text|--ids ids] [--steps N]\n");
+            fprintf(stderr, "Usage: rina_infer --model model.rinn|model.gguf [--gguf] [--prompt text|--ids ids] [--steps N] [--ctx N]\n");
             return 1;
         }
     }
@@ -169,7 +171,7 @@ int main(int argc, char** argv) {
 
     // Load tokenizer early (needed for --prompt)
     RINNModel rinn;
-    {
+    if (!use_gguf) {
         std::string tok_path = model_path;
         rinn.load(tok_path.c_str());
     }
@@ -206,7 +208,14 @@ int main(int argc, char** argv) {
     if (use_gguf) {
         fprintf(stderr, "Loading GGUF model via llama.cpp CUDA runtime: %s\n", model_path);
         const double t_load0 = now_ms();
-        LlamaRuntime * rt = llama_runtime_load(model_path, std::max(4096, (int)prompt.size() + steps + 16));
+        int runtime_ctx = requested_ctx;
+        if (runtime_ctx <= 0) {
+            int needed = (int)prompt.size() + std::max(0, steps) + 16;
+            if (bench_prompt > 0) needed = std::max(needed, bench_prompt);
+            if (prompt.empty() && !g_prompt_text.empty()) needed = std::max(needed, (int)g_prompt_text.size() + std::max(0, steps) + 16);
+            runtime_ctx = std::max(512, needed);
+        }
+        LlamaRuntime * rt = llama_runtime_load(model_path, runtime_ctx);
         if (!rt) return 1;
         const double t_load_ms = now_ms() - t_load0;
         if (prompt.empty() && !g_prompt_text.empty()) {
