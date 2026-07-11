@@ -36,6 +36,12 @@ static void llama_runtime_init_once() {
     }
 }
 
+static int llama_runtime_threads() {
+    const char * env = getenv("RINA_LLAMA_THREADS");
+    if (env && atoi(env) > 0) return atoi(env);
+    return 6;
+}
+
 LlamaRuntime * llama_runtime_load(const char * path, int n_ctx) {
     llama_runtime_init_once();
 
@@ -57,8 +63,8 @@ LlamaRuntime * llama_runtime_load(const char * path, int n_ctx) {
     cparams.n_batch = std::max<uint32_t>(cparams.n_ctx, 512);
     cparams.n_ubatch = std::min<uint32_t>(cparams.n_ctx, 512);
     cparams.n_seq_max = 1;
-    cparams.n_threads = 4;
-    cparams.n_threads_batch = 4;
+    cparams.n_threads = llama_runtime_threads();
+    cparams.n_threads_batch = llama_runtime_threads();
     cparams.offload_kqv = true;
     cparams.op_offload = true;
     cparams.no_perf = false;
