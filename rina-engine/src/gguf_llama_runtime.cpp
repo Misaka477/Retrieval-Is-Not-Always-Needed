@@ -82,8 +82,10 @@ LlamaRuntime * llama_runtime_load(const char * path, int n_ctx) {
     runtime->ctx = ctx;
     runtime->vocab_size = llama_vocab_n_tokens(llama_model_get_vocab(model));
     runtime->n_ctx = (int)llama_n_ctx(ctx);
-    fprintf(stderr, "llama runtime CUDA: ctx=%d vocab=%d gpu_offload=%s\n",
-            runtime->n_ctx, runtime->vocab_size, llama_supports_gpu_offload() ? "yes" : "no");
+    if (!getenv("RINA_LLAMA_QUIET")) {
+        fprintf(stderr, "llama runtime CUDA: ctx=%d vocab=%d gpu_offload=%s\n",
+                runtime->n_ctx, runtime->vocab_size, llama_supports_gpu_offload() ? "yes" : "no");
+    }
     return runtime;
 }
 
@@ -157,6 +159,54 @@ int32_t * llama_runtime_tokenize_text(LlamaRuntime * runtime, const char * text,
     return tokens;
 }
 
+char * llama_runtime_detokenize_token(LlamaRuntime * runtime, int32_t token, bool special) {
+    if (!runtime || !runtime->model) return nullptr;
+
+    const llama_vocab * vocab = llama_model_get_vocab(runtime->model);
+    int32_t needed = llama_token_to_piece(vocab, token, nullptr, 0, 0, special);
+    if (needed == std::numeric_limits<int32_t>::min()) return nullptr;
+    if (needed < 0) needed = -needed;
+
+    char * text = (char *)malloc((size_t)needed + 1);
+    if (!text) return nullptr;
+
+    int32_t written = llama_token_to_piece(vocab, token, text, needed + 1, 0, special);
+    if (written < 0) {
+        free(text);
+        return nullptr;
+    }
+    text[written] = '\0';
+    return text;
+}
+
+char * llama_runtime_detokenize_tokens(LlamaRuntime * runtime, const int32_t * tokens, int n_tokens, bool special) {
+    if (!runtime || !runtime->model || (!tokens && n_tokens > 0) || n_tokens < 0) return nullptr;
+
+    if (n_tokens == 0) {
+        char * empty = (char *)malloc(1);
+        if (empty) empty[0] = '\0';
+        return empty;
+    }
+
+    const llama_vocab * vocab = llama_model_get_vocab(runtime->model);
+    const bool remove_special = !special;
+    const bool unparse_special = special;
+    int32_t needed = llama_detokenize(vocab, tokens, n_tokens, nullptr, 0, remove_special, unparse_special);
+    if (needed == std::numeric_limits<int32_t>::min()) return nullptr;
+    if (needed < 0) needed = -needed;
+
+    char * text = (char *)malloc((size_t)needed + 1);
+    if (!text) return nullptr;
+
+    int32_t written = llama_detokenize(vocab, tokens, n_tokens, text, needed + 1, remove_special, unparse_special);
+    if (written < 0) {
+        free(text);
+        return nullptr;
+    }
+    text[written] = '\0';
+    return text;
+}
+
 static double llama_runtime_lse(const float * row, int n) {
     double mx = -INFINITY;
     double sum = 0.0;
@@ -201,7 +251,7 @@ float * llama_runtime_forward_select(LlamaRuntime * runtime, const int32_t * tok
     if (!result) return nullptr;
     int out_row = 0;
 
-    const int n_batch = std::min(n_tokens, 256);
+    const int n_batch = std::min(n_tokens, 64);
     llama_batch batch = llama_batch_init(n_batch, 0, 1);
     for (int start = 0; start < n_tokens; start += n_batch) {
         const int batch_size = std::min(n_batch, n_tokens - start);
@@ -261,7 +311,7 @@ bool llama_runtime_score_select(LlamaRuntime * runtime, const int32_t * tokens, 
     llama_memory_clear(llama_get_memory(runtime->ctx), true);
 
     int scored = 0;
-    const int n_batch = std::min(n_tokens, 256);
+    const int n_batch = std::min(n_tokens, 64);
     llama_batch batch = llama_batch_init(n_batch, 0, 1);
     for (int start = 0; start < n_tokens; start += n_batch) {
         const int batch_size = std::min(n_batch, n_tokens - start);

@@ -1,12 +1,15 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cmath>
 #include <algorithm>
 #include <chrono>
+#include <numeric>
 #include <random>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <sys/stat.h>
 #include "core/config.h"
@@ -26,12 +29,94 @@ extern "C" void pt_free();
 static std::mt19937 rng;
 static std::string g_prompt_text;
 
+static std::string json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b"; break;
+            case '\f': out += "\\f"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    char buf[7];
+                    snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out.push_back((char)c);
+                }
+        }
+    }
+    return out;
+}
+
+static std::string take_utf8_text(std::string& pending, bool final) {
+    std::string out;
+    size_t i = 0;
+    while (i < pending.size()) {
+        const unsigned char lead = (unsigned char)pending[i];
+        size_t width = 1;
+        if (lead < 0x80) width = 1;
+        else if (lead >= 0xc2 && lead <= 0xdf) width = 2;
+        else if (lead >= 0xe0 && lead <= 0xef) width = 3;
+        else if (lead >= 0xf0 && lead <= 0xf4) width = 4;
+        else {
+            out += "\xef\xbf\xbd";
+            i++;
+            continue;
+        }
+        if (i + width > pending.size()) {
+            if (final) {
+                out += "\xef\xbf\xbd";
+                i = pending.size();
+            }
+            break;
+        }
+        bool valid = true;
+        for (size_t j = 1; j < width; j++) {
+            if (((unsigned char)pending[i + j] & 0xc0) != 0x80) {
+                valid = false;
+                break;
+            }
+        }
+        if (valid && width == 3) {
+            const unsigned char second = (unsigned char)pending[i + 1];
+            valid = !((lead == 0xe0 && second < 0xa0) || (lead == 0xed && second >= 0xa0));
+        } else if (valid && width == 4) {
+            const unsigned char second = (unsigned char)pending[i + 1];
+            valid = !((lead == 0xf0 && second < 0x90) || (lead == 0xf4 && second >= 0x90));
+        }
+        if (!valid) {
+            out += "\xef\xbf\xbd";
+            i++;
+            continue;
+        }
+        out.append(pending, i, width);
+        i += width;
+    }
+    pending.erase(0, i);
+    return out;
+}
+
 static double now_ms() {
     using clock = std::chrono::steady_clock;
     return std::chrono::duration<double, std::milli>(clock::now().time_since_epoch()).count();
 }
 
-static int sample(const float* logits, int n, float temp, int topk, float topp, float rep, const std::vector<int>& gen, bool greedy) {
+static void normalize_probs(std::vector<std::pair<float,int>>& idx, int nk) {
+    float sum = 0.0f;
+    for (int i = 0; i < nk; i++) sum += idx[i].first;
+    if (sum <= 0.0f) return;
+    for (int i = 0; i < nk; i++) idx[i].first /= sum;
+}
+
+static int sample(const float* logits, int n, float temp, int topk, float topp, float minp, float typical,
+                  float rep, float freq_penalty, float presence_penalty, int penalty_last_n,
+                  const std::vector<int>& gen, bool greedy) {
     if (greedy || temp <= 0) {
         float mx = -1e10f; int argmax = 0;
         for (int i = 0; i < n; i++) {
@@ -41,12 +126,21 @@ static int sample(const float* logits, int n, float temp, int topk, float topp, 
         return argmax;
     }
 
-    // 1. Copy + apply repetition penalty + temperature
+    std::unordered_map<int, int> counts;
+    const int history_n = penalty_last_n < 0 ? (int)gen.size() : std::min((int)gen.size(), penalty_last_n);
+    const int history_begin = (int)gen.size() - history_n;
+    for (int k = history_begin; k < (int)gen.size(); k++) {
+        if (gen[k] >= 0 && gen[k] < n) counts[gen[k]]++;
+    }
+
+    // 1. Copy + apply penalties + temperature
     std::vector<std::pair<float,int>> idx(n);
     for (int i = 0; i < n; i++) {
         float v = logits[i];
-        for (size_t k = 0; k < gen.size(); k++)
-            if (gen[k] == i) { v = (v > 0) ? v / rep : v * rep; break; }
+        auto count_it = counts.find(i);
+        const int count = count_it == counts.end() ? 0 : count_it->second;
+        if (count > 0 && rep != 1.0f) v = (v > 0) ? v / rep : v * rep;
+        if (count > 0) v -= (float)count * freq_penalty + presence_penalty;
         idx[i] = {v / temp, i};
     }
 
@@ -62,7 +156,20 @@ static int sample(const float* logits, int n, float temp, int topk, float topp, 
     for (int i = 0; i < nk; i++) { float e = expf(idx[i].first - maxv); idx[i].first = e; sum += e; }
     for (int i = 0; i < nk; i++) idx[i].first /= sum;
 
-    // 4. Top-p (nucleus): zero out tokens below cumulative threshold
+    // 4. Min-p: keep tokens whose probability is at least minp * max_probability.
+    if (minp > 0.0f && minp < 1.0f && nk > 0) {
+        float maxp = 0.0f;
+        for (int i = 0; i < nk; i++) maxp = std::max(maxp, idx[i].first);
+        const float threshold = maxp * minp;
+        bool kept_any = false;
+        for (int i = 0; i < nk; i++) {
+            if (idx[i].first >= threshold) kept_any = true;
+            else idx[i].first = 0.0f;
+        }
+        if (kept_any) normalize_probs(idx, nk);
+    }
+
+    // 5. Top-p (nucleus): zero out tokens below cumulative threshold
     if (topp > 0.0f && topp < 1.0f) {
         std::sort(idx.begin(), idx.begin() + nk,
                   [](auto& a, auto& b) { return a.first > b.first; });
@@ -73,22 +180,44 @@ static int sample(const float* logits, int n, float temp, int topk, float topp, 
         }
         float sum2 = 0;
         for (int i = 0; i < nk; i++) sum2 += idx[i].first;
-        for (int i = 0; i < nk; i++) idx[i].first /= sum2;
+        if (sum2 > 0.0f) for (int i = 0; i < nk; i++) idx[i].first /= sum2;
     }
 
-    // 5. Full-size multinomial (matching PyTorch CPU multinomial)
-    // Build cumulative distribution over all n elements
-    std::vector<double> full_cum(n + 1, 0.0);
-    for (int i = 0; i < n; i++) {
-        // find idx for token i in the top-k list
-        int ti = -1;
-        for (int j = 0; j < nk; j++) if (idx[j].second == i) { ti = j; break; }
-        full_cum[i+1] = full_cum[i] + (ti >= 0 ? idx[ti].first : 0.0);
+    // 6. Locally typical sampling.
+    if (typical > 0.0f && typical < 1.0f && nk > 0) {
+        double entropy = 0.0;
+        for (int i = 0; i < nk; i++) {
+            if (idx[i].first > 0.0f) entropy -= idx[i].first * logf(idx[i].first);
+        }
+        std::vector<int> order(nk);
+        std::iota(order.begin(), order.end(), 0);
+        std::sort(order.begin(), order.end(), [&](int a, int b) {
+            const float pa = std::max(idx[a].first, 1e-20f);
+            const float pb = std::max(idx[b].first, 1e-20f);
+            return fabsf(-logf(pa) - (float)entropy) < fabsf(-logf(pb) - (float)entropy);
+        });
+        std::vector<char> keep(nk, 0);
+        float cum = 0.0f;
+        for (int rank = 0; rank < nk; rank++) {
+            const int j = order[rank];
+            if (rank == 0 || cum < typical) {
+                keep[j] = 1;
+                cum += idx[j].first;
+            }
+        }
+        for (int i = 0; i < nk; i++) if (!keep[i]) idx[i].first = 0.0f;
+        normalize_probs(idx, nk);
     }
+
+    // 7. Multinomial over the filtered candidate set.
     std::uniform_real_distribution<double> dist(0.0, 1.0);
-    double r = dist(rng) * full_cum[n];
-    auto it = std::upper_bound(full_cum.begin(), full_cum.end(), r);
-    return std::max(0, (int)(it - full_cum.begin()) - 1);
+    double r = dist(rng);
+    double cum = 0.0;
+    for (int i = 0; i < nk; i++) {
+        cum += idx[i].first;
+        if (r <= cum) return idx[i].second;
+    }
+    return idx[std::max(0, nk - 1)].second;
 }
 
 static int sample_greedy(const float* logits, int n) {
@@ -109,12 +238,18 @@ int main(int argc, char** argv) {
     int bench_prompt = 0;
     int bench_reps = 3;
     int requested_ctx = 0;
-    float temp = 0.8f, topp = 0.9f, rep = 1.1f;
+    float temp = 0.8f, topp = 0.9f, minp = 0.0f, typical = 1.0f, rep = 1.1f;
+    float freq_penalty = 0.0f, presence_penalty = 0.0f;
+    int penalty_last_n = -1;
     int topk = 40;
     bool greedy = true;
     bool use_pytorch = false;
     bool use_bf16 = false;
     bool use_gguf = false;
+    bool print_token_ids = false;
+    bool jsonl = false;
+    bool stream = true;
+    bool quiet = false;
     std::string kv_quant_mode = "fp32";
     bool pre_rope = false;
     struct stat st;
@@ -144,13 +279,23 @@ int main(int argc, char** argv) {
         else if (strcmp(argv[i], "--bench-prompt") == 0) bench_prompt = atoi(argv[++i]);
         else if (strcmp(argv[i], "--bench-reps") == 0) bench_reps = atoi(argv[++i]);
         else if (strcmp(argv[i], "--temp") == 0) { temp = atof(argv[++i]); greedy = false; }
-        else if (strcmp(argv[i], "--topk") == 0) topk = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--topp") == 0) topp = atof(argv[++i]);
-        else if (strcmp(argv[i], "--rep") == 0) rep = atof(argv[++i]);
+        else if (strcmp(argv[i], "--topk") == 0 || strcmp(argv[i], "--top-k") == 0) topk = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--topp") == 0 || strcmp(argv[i], "--top-p") == 0) topp = atof(argv[++i]);
+        else if (strcmp(argv[i], "--minp") == 0 || strcmp(argv[i], "--min-p") == 0) { minp = atof(argv[++i]); greedy = false; }
+        else if (strcmp(argv[i], "--typical") == 0 || strcmp(argv[i], "--typical-p") == 0) { typical = atof(argv[++i]); greedy = false; }
+        else if (strcmp(argv[i], "--rep") == 0 || strcmp(argv[i], "--repeat-penalty") == 0) rep = atof(argv[++i]);
+        else if (strcmp(argv[i], "--frequency-penalty") == 0) freq_penalty = atof(argv[++i]);
+        else if (strcmp(argv[i], "--presence-penalty") == 0) presence_penalty = atof(argv[++i]);
+        else if (strcmp(argv[i], "--repeat-last-n") == 0 || strcmp(argv[i], "--penalty-last-n") == 0) penalty_last_n = atoi(argv[++i]);
         else if (strcmp(argv[i], "--seed") == 0) seed = (unsigned int)atoi(argv[++i]);
         else if (strcmp(argv[i], "--bf16") == 0) use_bf16 = true;
         else if (strcmp(argv[i], "--qbits") == 0) { if(i+1<argc) i++; }
         else if (strcmp(argv[i], "--gguf") == 0) use_gguf = true;
+        else if (strcmp(argv[i], "--print-token-ids") == 0) print_token_ids = true;
+        else if (strcmp(argv[i], "--jsonl") == 0) jsonl = true;
+        else if (strcmp(argv[i], "--stream") == 0) stream = true;
+        else if (strcmp(argv[i], "--no-stream") == 0) stream = false;
+        else if (strcmp(argv[i], "--quiet") == 0) quiet = true;
         else if (strcmp(argv[i], "--kv-quant") == 0) {
             if (i + 1 < argc && argv[i + 1][0] != '-') kv_quant_mode = argv[++i];
             else kv_quant_mode = "q2k_q1v";
@@ -158,11 +303,12 @@ int main(int argc, char** argv) {
         else if (strcmp(argv[i], "--pre-rope") == 0) pre_rope = true;
         else {
             fprintf(stderr, "Unknown argument: %s\n", argv[i]);
-            fprintf(stderr, "Usage: rina_infer --model model.rinn|model.gguf [--gguf] [--prompt text|--ids ids] [--steps N] [--ctx N]\n");
+            fprintf(stderr, "Usage: rina_infer --model model.rinn|model.gguf [--gguf] [--prompt text|--ids ids] [--steps N] [--ctx N] [--temp T] [--top-k K] [--top-p P] [--min-p P] [--typical-p P] [--repeat-penalty P] [--frequency-penalty P] [--presence-penalty P] [--repeat-last-n N] [--stream|--no-stream] [--print-token-ids] [--jsonl] [--quiet]\n");
             return 1;
         }
     }
-    if (seed) rng.seed(seed);
+    rng.seed(seed);
+    if (quiet) setenv("RINA_LLAMA_QUIET", "1", 1);
 
     if (!model_path) {
         fprintf(stderr, "Usage: rina_infer --model model.rinn [--prompt \"Hello\"] [--steps N]\n");
@@ -182,7 +328,7 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (use_gguf) {
-            fprintf(stderr, "  gguf prompt text will be tokenized by llama.cpp runtime\n");
+            if (!quiet) fprintf(stderr, "  gguf prompt text will be tokenized by llama.cpp runtime\n");
         } else {
         // Try C++ tokenizer first
             if (rinn.tokenizer.vocab_size() > 0) {
@@ -206,7 +352,7 @@ int main(int argc, char** argv) {
     if (kv_quant_mode != "fp32")
         fprintf(stderr, "  kv-quant: %s\n", kv_quant_mode.c_str());
     if (use_gguf) {
-        fprintf(stderr, "Loading GGUF model via llama.cpp CUDA runtime: %s\n", model_path);
+        if (!quiet) fprintf(stderr, "Loading GGUF model via llama.cpp CUDA runtime: %s\n", model_path);
         const double t_load0 = now_ms();
         int runtime_ctx = requested_ctx;
         if (runtime_ctx <= 0) {
@@ -229,10 +375,12 @@ int main(int argc, char** argv) {
             }
             prompt.assign(llama_tokens, llama_tokens + n_llama_tokens);
             free(llama_tokens);
-            fprintf(stderr, "  gguf prompt=\"%s\" -> %zu tokens\n", g_prompt_text.c_str(), prompt.size());
-            fprintf(stderr, "  tokens:");
-            for (int t : prompt) fprintf(stderr, " %d", t);
-            fprintf(stderr, "\n");
+            if (!quiet) {
+                fprintf(stderr, "  gguf prompt=\"%s\" -> %zu tokens\n", g_prompt_text.c_str(), prompt.size());
+                fprintf(stderr, "  tokens:");
+                for (int t : prompt) fprintf(stderr, " %d", t);
+                fprintf(stderr, "\n");
+            }
         }
         if (bench_prompt > 0) {
             std::vector<int32_t> bench_ids(bench_prompt, 1);
@@ -261,7 +409,7 @@ int main(int argc, char** argv) {
         std::vector<int32_t> ids(prompt.begin(), prompt.end());
         if (ids.empty()) ids = {1};
         const size_t prefill_tokens = ids.size();
-        fprintf(stderr, "  runtime prefill on %zu tokens\n", ids.size());
+        if (!quiet) fprintf(stderr, "  runtime prefill on %zu tokens\n", ids.size());
         llama_runtime_reset(rt);
         const double t_prefill0 = now_ms();
         const float * logits = llama_runtime_eval_last_view(rt, ids.data(), (int)ids.size());
@@ -269,12 +417,17 @@ int main(int argc, char** argv) {
         if (logits) {
             int vs = llama_runtime_vocab_size(rt);
             const float * next_logits = logits;
-            fprintf(stderr, "  logits[0..4] = %.4f %.4f %.4f %.4f %.4f\n",
-                    next_logits[0], next_logits[1], next_logits[2], next_logits[3], next_logits[4]);
+            if (!quiet) {
+                fprintf(stderr, "  logits[0..4] = %.4f %.4f %.4f %.4f %.4f\n",
+                        next_logits[0], next_logits[1], next_logits[2], next_logits[3], next_logits[4]);
+            }
         }
         double t_sample_ms = 0.0;
         double t_decode_ms = 0.0;
         std::vector<int> gen_history(ids.begin(), ids.end());
+        std::vector<int32_t> generated_tokens;
+        generated_tokens.reserve(std::max(0, steps));
+        std::string utf8_pending;
         for (int step = 0; step < steps; step++) {
             if (!logits) { llama_runtime_free(rt); return 1; }
             int vs = llama_runtime_vocab_size(rt);
@@ -282,9 +435,23 @@ int main(int argc, char** argv) {
             const double t_sample0 = now_ms();
             int next = (greedy || temp <= 0.0f)
                 ? sample_greedy(next_logits, vs)
-                : sample(next_logits, vs, temp, topk, topp, rep, gen_history, false);
+                : sample(next_logits, vs, temp, topk, topp, minp, typical, rep, freq_penalty, presence_penalty, penalty_last_n, gen_history, false);
             t_sample_ms += now_ms() - t_sample0;
             ids.push_back(next);
+            generated_tokens.push_back(next);
+            if (jsonl || stream) {
+                char * piece = llama_runtime_detokenize_token(rt, next, false);
+                if (piece) utf8_pending += piece;
+                free(piece);
+                const std::string text = take_utf8_text(utf8_pending, step + 1 == steps);
+                if (jsonl) {
+                    printf("{\"event\":\"token\",\"index\":%d,\"id\":%d,\"text\":\"%s\",\"logprob\":null}\n",
+                           step, next, json_escape(text).c_str());
+                } else if (!text.empty()) {
+                    fwrite(text.data(), 1, text.size(), stdout);
+                }
+                fflush(stdout);
+            }
             gen_history.push_back(next);
             int32_t next_i32 = next;
             const double t_decode0 = now_ms();
@@ -292,18 +459,40 @@ int main(int argc, char** argv) {
             t_decode_ms += now_ms() - t_decode0;
         }
         if (steps > 0) {
-            printf("tokens:");
-            for (size_t i = prompt.size(); i < ids.size(); i++) printf(" %d", ids[i]);
-            printf("\n");
+            if (!jsonl && !stream) {
+                char * text = llama_runtime_detokenize_tokens(rt, generated_tokens.data(), (int)generated_tokens.size(), false);
+                if (text) {
+                    printf("%s\n", text);
+                    fflush(stdout);
+                    free(text);
+                } else {
+                    fprintf(stderr, "llama runtime: failed to detokenize generated tokens\n");
+                }
+            }
+            if (!jsonl && stream) {
+                printf("\n");
+                fflush(stdout);
+            }
+            if (print_token_ids) {
+                printf("tokens:");
+                for (int32_t id : generated_tokens) printf(" %d", id);
+                printf("\n");
+                fflush(stdout);
+            }
         }
         LlamaRuntimePerf perf = llama_runtime_perf(rt);
-        llama_runtime_free(rt);
         const double prefill_tps = t_prefill_ms > 0.0 ? (double)prefill_tokens * 1000.0 / t_prefill_ms : 0.0;
         const double decode_tps = t_decode_ms > 0.0 ? (double)steps * 1000.0 / t_decode_ms : 0.0;
+        if (jsonl) {
+            printf("{\"event\":\"perf\",\"prefill_tokens_per_second\":%.3f,\"decode_tokens_per_second\":%.3f,\"decode_tokens\":%d}\n",
+                   prefill_tps, decode_tps, steps);
+            fflush(stdout);
+        }
+        llama_runtime_free(rt);
         fprintf(stderr, "RINA_INFER_PERF {\"load_ms\":%.3f,\"prefill_ms\":%.3f,\"prefill_tokens\":%zu,\"prefill_tokens_per_second\":%.3f,\"decode_ms\":%.3f,\"decode_tokens\":%d,\"decode_tokens_per_second\":%.3f,\"sample_ms\":%.3f,\"llama_prompt_eval_ms\":%.3f,\"llama_prompt_tokens\":%d,\"llama_eval_ms\":%.3f,\"llama_eval_tokens\":%d,\"llama_graph_reused\":%d}\n",
                 t_load_ms, t_prefill_ms, prefill_tokens, prefill_tps, t_decode_ms, steps, decode_tps, t_sample_ms,
                 perf.prompt_eval_ms, perf.prompt_tokens, perf.eval_ms, perf.eval_tokens, perf.graph_reused);
-        fprintf(stderr, "llama runtime done\n");
+        if (!quiet) fprintf(stderr, "llama runtime done\n");
         return 0;
     } else {
         // Auto-detect: HF directory (has config.json) vs .rinn file/directory
@@ -390,7 +579,7 @@ int main(int argc, char** argv) {
         cudaMemcpy(cpu.data(), d_logits + (T - 1) * cfg.vocab_size,
                    cfg.vocab_size * sizeof(float), cudaMemcpyDeviceToHost);
 
-        int next = sample(cpu.data(), cfg.vocab_size, temp, topk, topp, rep, gen, greedy);
+        int next = sample(cpu.data(), cfg.vocab_size, temp, topk, topp, minp, typical, rep, freq_penalty, presence_penalty, penalty_last_n, gen, greedy);
         gen.push_back(next);
         cudaMemcpyAsync(d_ids + gen.size() - 1, &next, sizeof(int), cudaMemcpyHostToDevice, s);
         cudaStreamSynchronize(s);

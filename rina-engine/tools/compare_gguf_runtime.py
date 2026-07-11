@@ -63,6 +63,26 @@ def parse_prefixed_json(output, prefix):
     return None
 
 
+def parse_generated_text_smoke(output):
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith((
+            "Loading GGUF model",
+            "llama runtime",
+            "gguf prompt text",
+            "gguf prompt=",
+            "tokens:",
+            "runtime prefill",
+            "logits[",
+            "RINA_INFER_PERF",
+        )):
+            continue
+        return True
+    return False
+
+
 def parse_json_array(output):
     start = output.find("[")
     end = output.rfind("]")
@@ -246,6 +266,10 @@ def main():
     if args.infer_steps > 0 and (infer_rc != 0 or not rina_infer_perf):
         print(json.dumps({"ok": False, "error": "RINA infer benchmark failed", "returncode": infer_rc}, indent=2))
         return 1
+    detokenize_smoke = parse_generated_text_smoke(infer_out) if args.infer_steps > 0 else None
+    if args.infer_steps > 0 and not detokenize_smoke:
+        print(json.dumps({"ok": False, "error": "RINA detokenize smoke failed", "returncode": infer_rc}, indent=2))
+        return 1
     if args.bench_prompt > 0 and (prompt_bench_rc != 0 or not rina_prompt_bench):
         print(json.dumps({"ok": False, "error": "RINA prompt benchmark failed", "returncode": prompt_bench_rc}, indent=2))
         return 1
@@ -273,6 +297,7 @@ def main():
         },
         "rina": rina,
         "rina_infer_perf": rina_infer_perf,
+        "rina_detokenize_smoke": detokenize_smoke,
         "rina_perf": rina_perf,
         "rina_prompt_bench": rina_prompt_bench,
         "relative_error": rel_error,
