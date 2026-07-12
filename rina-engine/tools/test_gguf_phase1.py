@@ -255,21 +255,121 @@ def test_sampler_params(rina_infer, model, prompt, steps, ctx, cwd, env, timeout
     }
 
 
-def test_compare_gate(repo, model, text_path, args, env, timeout):
-    compare = repo / "rina-engine/tools/compare_gguf_runtime.py"
+def test_stop_strings(rina_infer, model, prompt, steps, ctx, cwd, env, timeout):
+    text_result = run(
+        [
+            str(rina_infer), "--gguf", "--model", str(model),
+            "--prompt", prompt, "--steps", str(steps), "--ctx", str(ctx),
+            "--stop", ".", "--quiet",
+        ],
+        cwd, env, timeout, "stop_text",
+    )
+    check_command_ok(text_result)
+    require("." not in text_result["stdout"], f"stop string leaked into text output: {text_result['stdout']}")
+    text_perf = parse_prefixed_json(text_result["stderr"], "RINA_INFER_PERF")
+    require(text_perf is not None, "missing RINA_INFER_PERF in stop text run")
+    require(0 < text_perf.get("decode_tokens", 0) < steps, "stop text run did not stop early")
+
+    jsonl_result = run(
+        [
+            str(rina_infer), "--gguf", "--model", str(model),
+            "--prompt", prompt, "--steps", str(steps), "--ctx", str(ctx),
+            "--stop", ".", "--jsonl", "--quiet",
+        ],
+        cwd, env, timeout, "stop_jsonl",
+    )
+    check_command_ok(jsonl_result)
+    rows = parse_json_stdout_lines(jsonl_result["stdout"])
+    token_text = "".join(row.get("text", "") for row in rows if row.get("event") == "token")
+    perf_events = [row for row in rows if row.get("event") == "perf"]
+    require("." not in token_text, f"stop string leaked into JSONL text: {token_text}")
+    require(len(perf_events) == 1, "stop JSONL did not emit exactly one perf event")
+    require(0 < perf_events[0].get("decode_tokens", 0) < steps, "stop JSONL run did not stop early")
+    return {
+        "text": text_result["stdout"].strip(),
+        "text_decode_tokens": text_perf["decode_tokens"],
+        "jsonl_decode_tokens": perf_events[0]["decode_tokens"],
+    }
+
+
+def test_logit_bias(rina_infer, model, prompt, ctx, cwd, env, timeout):
     result = run(
         [
-            sys.executable,
-            str(compare),
-            "--model", str(model),
-            "--text", str(text_path),
-            "--context", str(args.compare_context),
-            "--stride", str(args.compare_stride),
-            "--infer-steps", str(args.compare_infer_steps),
-            "--bench-prompt", str(args.bench_prompt),
-            "--bench-reps", str(args.bench_reps),
-            "--tolerance", str(args.tolerance),
+            str(rina_infer), "--gguf", "--model", str(model),
+            "--prompt", prompt, "--steps", "1", "--ctx", str(ctx),
+            "--logit-bias", "13:80.0", "--print-token-ids", "--quiet",
         ],
+        cwd, env, timeout, "logit_bias",
+    )
+    check_command_ok(result)
+    token_lines = [line.strip() for line in result["stdout"].splitlines() if line.strip().startswith("tokens:")]
+    require(len(token_lines) == 1, "logit bias run did not emit one token line")
+    token_ids = [int(x) for x in re.findall(r"-?\d+", token_lines[0])]
+    require(token_ids == [13], f"logit bias did not force token 13: {token_ids}")
+    perf = parse_prefixed_json(result["stderr"], "RINA_INFER_PERF")
+    require(perf is not None, "missing RINA_INFER_PERF in logit bias run")
+    return {
+        "tokens": token_ids,
+        "perf": perf,
+    }
+
+
+def test_llama_sampler_backend(rina_infer, model, prompt, ctx, cwd, env, timeout):
+    text_result = run(
+        [
+            str(rina_infer), "--gguf", "--model", str(model),
+            "--prompt", prompt, "--steps", "4", "--ctx", str(ctx),
+            "--sampler-backend", "llama", "--quiet",
+        ],
+        cwd, env, timeout, "llama_sampler_text",
+    )
+    check_command_ok(text_result)
+    require(text_result["stdout"].strip(), "llama sampler backend text output is empty")
+    text_perf = parse_prefixed_json(text_result["stderr"], "RINA_INFER_PERF")
+    require(text_perf is not None, "missing RINA_INFER_PERF in llama sampler text run")
+    require(text_perf.get("decode_tokens") == 4, "llama sampler text decode_tokens mismatch")
+
+    bias_result = run(
+        [
+            str(rina_infer), "--gguf", "--model", str(model),
+            "--prompt", prompt, "--steps", "1", "--ctx", str(ctx),
+            "--sampler-backend", "llama", "--logit-bias", "13:80.0",
+            "--print-token-ids", "--quiet",
+        ],
+        cwd, env, timeout, "llama_sampler_logit_bias",
+    )
+    check_command_ok(bias_result)
+    token_lines = [line.strip() for line in bias_result["stdout"].splitlines() if line.strip().startswith("tokens:")]
+    require(len(token_lines) == 1, "llama sampler logit bias did not emit one token line")
+    token_ids = [int(x) for x in re.findall(r"-?\d+", token_lines[0])]
+    require(token_ids == [13], f"llama sampler logit bias did not force token 13: {token_ids}")
+    return {
+        "text": text_result["stdout"].strip(),
+        "tokens": token_ids,
+    }
+
+
+def test_compare_gate(repo, model, text_path, args, env, timeout):
+    compare = repo / "rina-engine/tools/compare_gguf_runtime.py"
+    cmd = [
+        sys.executable,
+        str(compare),
+        "--model", str(model),
+        "--text", str(text_path),
+        "--context", str(args.compare_context),
+        "--stride", str(args.compare_stride),
+        "--infer-steps", str(args.compare_infer_steps),
+        "--bench-prompt", str(args.bench_prompt),
+        "--bench-reps", str(args.bench_reps),
+        "--tolerance", str(args.tolerance),
+        "--perf-retries", str(args.perf_retries),
+    ]
+    if args.min_prompt_ratio > 0.0:
+        cmd.extend(["--min-prompt-ratio", str(args.min_prompt_ratio)])
+    if args.min_decode_ratio > 0.0:
+        cmd.extend(["--min-decode-ratio", str(args.min_decode_ratio)])
+    result = run(
+        cmd,
         repo / "rina-engine",
         env,
         timeout,
@@ -298,6 +398,9 @@ def main():
     parser.add_argument("--bench-prompt", type=int, default=128)
     parser.add_argument("--bench-reps", type=int, default=3)
     parser.add_argument("--tolerance", type=float, default=0.05)
+    parser.add_argument("--min-prompt-ratio", type=float, default=0.0)
+    parser.add_argument("--min-decode-ratio", type=float, default=0.0)
+    parser.add_argument("--perf-retries", type=int, default=1)
     parser.add_argument("--smoke-repeats", type=int, default=20)
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--cuda-bin", default="/home/aquama/miniconda3/envs/natalia/bin")
@@ -338,6 +441,9 @@ def main():
     jsonl = test_jsonl(rina_infer, model, args.prompt, args.jsonl_steps, args.ctx, rina_dir, env, args.timeout)
     sampler_determinism = test_sampler_determinism(rina_infer, model, args.prompt, args.sampler_steps, args.ctx, rina_dir, env, args.timeout)
     sampler_params = test_sampler_params(rina_infer, model, args.prompt, args.sampler_steps, args.ctx, rina_dir, env, args.timeout)
+    stop_strings = test_stop_strings(rina_infer, model, args.prompt, args.sampler_steps, args.ctx, rina_dir, env, args.timeout)
+    logit_bias = test_logit_bias(rina_infer, model, args.prompt, args.ctx, rina_dir, env, args.timeout)
+    llama_sampler_backend = test_llama_sampler_backend(rina_infer, model, args.prompt, args.ctx, rina_dir, env, args.timeout)
     compare = test_compare_gate(repo, model, smoke_text, args, env, args.timeout)
 
     summary = {
@@ -354,6 +460,9 @@ def main():
         },
         "sampler_determinism": sampler_determinism,
         "sampler_params": sampler_params,
+        "stop_strings": stop_strings,
+        "logit_bias": logit_bias,
+        "llama_sampler_backend": llama_sampler_backend,
         "compare_gate": compare,
     }
     print(json.dumps(summary, indent=2, sort_keys=True))

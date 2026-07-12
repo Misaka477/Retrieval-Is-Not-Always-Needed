@@ -37,13 +37,13 @@ Efficient language modeling with **Jamba-style hybrid**: SSM (InertiaWave) + Spa
 
 ## Inference Engine (C++ / CUDA)
 
-A CUDA C++ inference engine for both custom **GQA** (Llama) and **MLA** (DeepSeek V2) architectures, with full GGUF format support.
+A CUDA C++ inference engine for custom **GQA** (Llama) / **MLA** (DeepSeek V2) `.rinn` models, plus a GGUF inference path backed by the installed llama.cpp runtime.
 
 ```
 rina-engine/src/
 ├── ops/       ← Ops (arch-independent): linear / rms_norm / rope / embedding / silu_mul / saxpy
 ├── arch/      ← Architecture definitions: GQA (gqa_layer) / MLA (deepseek_mla_layer) / SSM
-├── loader/    ← GGUF reader + ArchLoader registry: gqa & mla name mappings
+├── loader/    ← .rinn loader + architecture metadata
 ├── infer/     ← Inference orchestrators: GQA engine / MLA engine (Inference interface)
 ├── core/      ← Infrastructure: buffer / tensor / config / quant
 └── main.cpp   ← CLI entry point (uses Inference interface)
@@ -67,13 +67,64 @@ make -j$(nproc)
 ./rina_infer --model /path/to/llama3.2-1b-fp32 \
   --ids "128000 791 7438 315 2324 374" --temp 0.0 --steps 30
 
-# MLA — DeepSeek-V2-Lite (GGUF, Q2_K)
-./rina_infer --model DeepSeek-V2-Lite.Q2_K.gguf --gguf \
-  --prompt "Hello" --temp 1.0 --topk 40 --steps 15
+# GGUF — llama.cpp runtime backend, text output by default
+./rina_infer --gguf \
+  --model /path/to/Llama-3.2-1B-Instruct-Q4_K_M.gguf \
+  --prompt "The capital of France is" \
+  --steps 32 --ctx 256
+
+# GGUF — structured JSONL stream
+./rina_infer --gguf \
+  --model /path/to/model.gguf \
+  --prompt "Hello" \
+  --steps 16 --jsonl --quiet
+
+# GGUF — sampler controls
+./rina_infer --gguf \
+  --model /path/to/model.gguf \
+  --prompt "Hello" \
+  --steps 64 --temp 0.8 --top-k 40 --top-p 0.9 \
+  --min-p 0.05 --typical-p 0.95 \
+  --repeat-penalty 1.05 --frequency-penalty 0.1 \
+  --presence-penalty 0.1 --stop "</s>"
 
 # GQA — with KV cache quant (q8 / q4 / q2k_q1v)
 ./rina_infer --model /path/to/llama3.2-1b-fp32 \
   --ids "128000 791 7438 315 2324 374" --kv-quant q8 --steps 30
+```
+
+### GGUF Runtime Notes
+
+RINA does not maintain a native GGUF loader or private GGML/CUDA kernel fork. The GGUF path uses llama.cpp for model loading, tokenizer, quant kernels, CUDA backend, KV cache, and low-level decode. RINA owns the upper layer: CLI behavior, text/JSONL output, sampler abstraction, observability, and correctness/performance gates.
+
+Useful GGUF flags:
+
+| Flag | Description |
+|------|-------------|
+| `--ctx` / `--context` | Override context size |
+| `--stream` / `--no-stream` | Stream text by token or print final text at the end |
+| `--jsonl` | Emit token/perf events as JSON lines |
+| `--quiet` | Suppress non-essential diagnostics while keeping perf JSON |
+| `--print-token-ids` | Print generated token IDs after text |
+| `--stop` | Stop generation when a string appears |
+| `--logit-bias token:bias` | Apply per-token logit bias |
+| `--sampler-backend rina\|llama` | Use RINA sampler or optional llama.cpp sampler chain for GGUF |
+
+GGUF gate:
+
+```bash
+python tools/test_gguf_phase1.py \
+  --model /path/to/model.gguf \
+  --infer-steps 128 \
+  --jsonl-steps 16 \
+  --compare-context 512 \
+  --compare-stride 512 \
+  --compare-infer-steps 128 \
+  --bench-prompt 512 \
+  --bench-reps 5 \
+  --min-prompt-ratio 0.95 \
+  --min-decode-ratio 0.95 \
+  --perf-retries 3
 ```
 
 ### Quantization Formats
@@ -187,7 +238,7 @@ rina/                     ★ PyTorch training (Gen 6 Jamba)
 rina-engine/              ★ C++ inference engine
   src/ops/                ─ Ops: linear / rms_norm / rope / embedding / silu_mul / saxpy
   src/arch/               ─ Arch: GQA (gqa_layer) / MLA (deepseek_mla_layer) / SSM
-  src/loader/             ─ Loader: GGUF reader + ArchLoader registry
+  src/loader/             ─ Loader: .rinn model files and metadata
   src/infer/              ─ Inference: GQA engine / MLA engine (Inference interface)
   src/core/               ─ Core: buffer / tensor / config / quant
   tests/                  ─ 27 test/alignment targets
@@ -263,13 +314,13 @@ mikotomisaka477@gmail.com
 
 ## 推理引擎（C++ / CUDA）
 
-CUDA C++ 推理引擎，支持 **GQA**（Llama）和 **MLA**（DeepSeek V2）两种 Attention 架构，完整 GGUF 格式加载。
+CUDA C++ 推理引擎，支持自研 **GQA**（Llama）/ **MLA**（DeepSeek V2）`.rinn` 模型，并提供基于已安装 llama.cpp runtime 的 GGUF 推理路径。
 
 ```
 rina-engine/src/
 ├── ops/       ← 算子（与架构无关）：linear / rms_norm / rope / embedding / silu_mul / saxpy
 ├── arch/      ← 架构定义：GQA（gqa_layer）/ MLA（deepseek_mla_layer）/ SSM
-├── loader/    ← GGUF 读取 + ArchLoader 注册表：GQA & MLA 名映射
+├── loader/    ← .rinn 加载 + 架构元数据
 ├── infer/     ← 推理编排：GQA 引擎 / MLA 引擎（Inference 接口）
 ├── core/      ← 基础设施：buffer / tensor / config / quant
 └── main.cpp   ← CLI 入口（通过 Inference 接口调用）
@@ -293,13 +344,64 @@ make -j$(nproc)
 ./rina_infer --model /path/to/llama3.2-1b-fp32 \
   --ids "128000 791 7438 315 2324 374" --temp 0.0 --steps 30
 
-# MLA — DeepSeek-V2-Lite (GGUF, Q2_K)
-./rina_infer --model DeepSeek-V2-Lite.Q2_K.gguf --gguf \
-  --prompt "Hello" --temp 1.0 --topk 40 --steps 15
+# GGUF — llama.cpp runtime backend，默认输出文本
+./rina_infer --gguf \
+  --model /path/to/Llama-3.2-1B-Instruct-Q4_K_M.gguf \
+  --prompt "The capital of France is" \
+  --steps 32 --ctx 256
+
+# GGUF — JSONL 结构化事件流
+./rina_infer --gguf \
+  --model /path/to/model.gguf \
+  --prompt "Hello" \
+  --steps 16 --jsonl --quiet
+
+# GGUF — sampler 参数
+./rina_infer --gguf \
+  --model /path/to/model.gguf \
+  --prompt "Hello" \
+  --steps 64 --temp 0.8 --top-k 40 --top-p 0.9 \
+  --min-p 0.05 --typical-p 0.95 \
+  --repeat-penalty 1.05 --frequency-penalty 0.1 \
+  --presence-penalty 0.1 --stop "</s>"
 
 # GQA — 搭配 KV cache 量化 (q8 / q4 / q2k_q1v)
 ./rina_infer --model /path/to/llama3.2-1b-fp32 \
   --ids "128000 791 7438 315 2324 374" --kv-quant q8 --steps 30
+```
+
+### GGUF Runtime 说明
+
+RINA 不再维护 native GGUF loader，也不复制 GGML/GGUF/CUDA kernel。GGUF 路径由 llama.cpp 负责模型加载、tokenizer、量化 kernel、CUDA backend、KV cache 和低层 decode；RINA 负责上层 CLI、文本/JSONL 输出、sampler 抽象、可观测性和 correctness/performance gate。
+
+常用 GGUF 参数：
+
+| 参数 | 说明 |
+|------|------|
+| `--ctx` / `--context` | 覆盖 context size |
+| `--stream` / `--no-stream` | 按 token 流式输出，或结束后一次性输出 |
+| `--jsonl` | 输出 token/perf JSON lines |
+| `--quiet` | 关闭非必要诊断，但保留 perf JSON |
+| `--print-token-ids` | 文本后额外打印生成 token IDs |
+| `--stop` | 命中字符串后停止生成 |
+| `--logit-bias token:bias` | 对指定 token 增加 logit bias |
+| `--sampler-backend rina\|llama` | GGUF 使用 RINA sampler 或可选 llama.cpp sampler chain |
+
+GGUF gate：
+
+```bash
+python tools/test_gguf_phase1.py \
+  --model /path/to/model.gguf \
+  --infer-steps 128 \
+  --jsonl-steps 16 \
+  --compare-context 512 \
+  --compare-stride 512 \
+  --compare-infer-steps 128 \
+  --bench-prompt 512 \
+  --bench-reps 5 \
+  --min-prompt-ratio 0.95 \
+  --min-decode-ratio 0.95 \
+  --perf-retries 3
 ```
 
 ### 量化格式支持
@@ -404,7 +506,7 @@ rina/                     ★ PyTorch 训练（Gen 6 Jamba）
 rina-engine/              ★ C++ 推理引擎
   src/ops/                ─ 算子：linear / rms_norm / rope / embedding / silu_mul / saxpy
   src/arch/               ─ 架构：GQA（gqa_layer）/ MLA（deepseek_mla_layer）/ SSM
-  src/loader/             ─ 加载器：GGUF 读取 + ArchLoader 注册表
+  src/loader/             ─ 加载器：.rinn 模型文件与元数据
   src/infer/              ─ 推理：GQA 引擎 / MLA 引擎（Inference 接口）
   src/core/               ─ 基础设施：buffer / tensor / config / quant
   tests/                  ─ 27 个测试/对齐目标

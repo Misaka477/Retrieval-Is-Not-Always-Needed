@@ -114,8 +114,27 @@ static void normalize_probs(std::vector<std::pair<float,int>>& idx, int nk) {
     for (int i = 0; i < nk; i++) idx[i].first /= sum;
 }
 
+static bool parse_logit_bias(const char * spec, std::pair<int, float>& out) {
+    char * end = nullptr;
+    long token = strtol(spec, &end, 10);
+    if (!end || *end != ':') return false;
+    char * bias_end = nullptr;
+    float bias = strtof(end + 1, &bias_end);
+    if (!bias_end || *bias_end != '\0') return false;
+    out = {(int)token, bias};
+    return true;
+}
+
+static float biased_logit(float value, int token, const std::vector<std::pair<int, float>>& logit_biases) {
+    for (const auto& bias : logit_biases) {
+        if (bias.first == token) return value + bias.second;
+    }
+    return value;
+}
+
 static int sample(const float* logits, int n, float temp, int topk, float topp, float minp, float typical,
                   float rep, float freq_penalty, float presence_penalty, int penalty_last_n,
+                  const std::vector<std::pair<int, float>>& logit_biases,
                   const std::vector<int>& gen, bool greedy) {
     if (greedy || temp <= 0) {
         float mx = -1e10f; int argmax = 0;
@@ -136,7 +155,7 @@ static int sample(const float* logits, int n, float temp, int topk, float topp, 
     // 1. Copy + apply penalties + temperature
     std::vector<std::pair<float,int>> idx(n);
     for (int i = 0; i < n; i++) {
-        float v = logits[i];
+        float v = biased_logit(logits[i], i, logit_biases);
         auto count_it = counts.find(i);
         const int count = count_it == counts.end() ? 0 : count_it->second;
         if (count > 0 && rep != 1.0f) v = (v > 0) ? v / rep : v * rep;
@@ -220,14 +239,24 @@ static int sample(const float* logits, int n, float temp, int topk, float topp, 
     return idx[std::max(0, nk - 1)].second;
 }
 
-static int sample_greedy(const float* logits, int n) {
+static int sample_greedy(const float* logits, int n, const std::vector<std::pair<int, float>>& logit_biases) {
     float mx = -1e10f;
     int argmax = 0;
     for (int i = 0; i < n; i++) {
-        float v = logits[i];
+        float v = biased_logit(logits[i], i, logit_biases);
         if (v > mx) { mx = v; argmax = i; }
     }
     return argmax;
+}
+
+static size_t find_stop_pos(const std::string& text, const std::vector<std::string>& stop_strings) {
+    size_t best = std::string::npos;
+    for (const std::string& stop : stop_strings) {
+        if (stop.empty()) continue;
+        const size_t pos = text.find(stop);
+        if (pos != std::string::npos && (best == std::string::npos || pos < best)) best = pos;
+    }
+    return best;
 }
 
 int main(int argc, char** argv) {
@@ -251,6 +280,9 @@ int main(int argc, char** argv) {
     bool stream = true;
     bool quiet = false;
     std::string kv_quant_mode = "fp32";
+    std::string sampler_backend = "rina";
+    std::vector<std::string> stop_strings;
+    std::vector<std::pair<int, float>> logit_biases;
     bool pre_rope = false;
     struct stat st;
     struct { bool embed=false,ln=false,attn=false,cproj=false,mlp=false; } custom;
@@ -296,6 +328,16 @@ int main(int argc, char** argv) {
         else if (strcmp(argv[i], "--stream") == 0) stream = true;
         else if (strcmp(argv[i], "--no-stream") == 0) stream = false;
         else if (strcmp(argv[i], "--quiet") == 0) quiet = true;
+        else if (strcmp(argv[i], "--stop") == 0) stop_strings.emplace_back(argv[++i]);
+        else if (strcmp(argv[i], "--sampler-backend") == 0) sampler_backend = argv[++i];
+        else if (strcmp(argv[i], "--logit-bias") == 0) {
+            std::pair<int, float> bias;
+            if (!parse_logit_bias(argv[++i], bias)) {
+                fprintf(stderr, "Invalid --logit-bias value, expected token_id:bias\n");
+                return 1;
+            }
+            logit_biases.push_back(bias);
+        }
         else if (strcmp(argv[i], "--kv-quant") == 0) {
             if (i + 1 < argc && argv[i + 1][0] != '-') kv_quant_mode = argv[++i];
             else kv_quant_mode = "q2k_q1v";
@@ -303,9 +345,13 @@ int main(int argc, char** argv) {
         else if (strcmp(argv[i], "--pre-rope") == 0) pre_rope = true;
         else {
             fprintf(stderr, "Unknown argument: %s\n", argv[i]);
-            fprintf(stderr, "Usage: rina_infer --model model.rinn|model.gguf [--gguf] [--prompt text|--ids ids] [--steps N] [--ctx N] [--temp T] [--top-k K] [--top-p P] [--min-p P] [--typical-p P] [--repeat-penalty P] [--frequency-penalty P] [--presence-penalty P] [--repeat-last-n N] [--stream|--no-stream] [--print-token-ids] [--jsonl] [--quiet]\n");
+            fprintf(stderr, "Usage: rina_infer --model model.rinn|model.gguf [--gguf] [--prompt text|--ids ids] [--steps N] [--ctx N] [--temp T] [--top-k K] [--top-p P] [--min-p P] [--typical-p P] [--repeat-penalty P] [--frequency-penalty P] [--presence-penalty P] [--repeat-last-n N] [--logit-bias token:bias] [--stop text] [--sampler-backend rina|llama] [--stream|--no-stream] [--print-token-ids] [--jsonl] [--quiet]\n");
             return 1;
         }
+    }
+    if (sampler_backend != "rina" && sampler_backend != "llama") {
+        fprintf(stderr, "Invalid --sampler-backend: %s\n", sampler_backend.c_str());
+        return 1;
     }
     rng.seed(seed);
     if (quiet) setenv("RINA_LLAMA_QUIET", "1", 1);
@@ -428,41 +474,94 @@ int main(int argc, char** argv) {
         std::vector<int32_t> generated_tokens;
         generated_tokens.reserve(std::max(0, steps));
         std::string utf8_pending;
+        std::string generated_text;
+        bool stopped = false;
+        int decoded_steps = 0;
+        LlamaRuntimeSampler * llama_sampler = nullptr;
+        if (sampler_backend == "llama") {
+            std::vector<int32_t> bias_tokens;
+            std::vector<float> bias_values;
+            bias_tokens.reserve(logit_biases.size());
+            bias_values.reserve(logit_biases.size());
+            for (const auto& bias : logit_biases) {
+                bias_tokens.push_back(bias.first);
+                bias_values.push_back(bias.second);
+            }
+            llama_sampler = llama_runtime_sampler_create(
+                llama_runtime_vocab_size(rt), greedy || temp <= 0.0f, seed, temp, topk, topp, minp, typical,
+                rep, freq_penalty, presence_penalty, penalty_last_n,
+                bias_tokens.data(), bias_values.data(), (int)bias_tokens.size());
+            if (!llama_sampler) {
+                fprintf(stderr, "llama runtime: failed to create sampler chain\n");
+                llama_runtime_free(rt);
+                return 1;
+            }
+            for (int32_t id : ids) llama_runtime_sampler_accept(llama_sampler, id);
+        }
         for (int step = 0; step < steps; step++) {
-            if (!logits) { llama_runtime_free(rt); return 1; }
+            if (!logits) {
+                llama_runtime_sampler_free(llama_sampler);
+                llama_runtime_free(rt);
+                return 1;
+            }
             int vs = llama_runtime_vocab_size(rt);
             const float * next_logits = logits;
             const double t_sample0 = now_ms();
-            int next = (greedy || temp <= 0.0f)
-                ? sample_greedy(next_logits, vs)
-                : sample(next_logits, vs, temp, topk, topp, minp, typical, rep, freq_penalty, presence_penalty, penalty_last_n, gen_history, false);
+            int next = 0;
+            if (llama_sampler) {
+                next = llama_runtime_sampler_sample(rt, llama_sampler);
+                if (next < 0) {
+                    fprintf(stderr, "llama runtime: sampler chain failed\n");
+                    llama_runtime_sampler_free(llama_sampler);
+                    llama_runtime_free(rt);
+                    return 1;
+                }
+            } else {
+                next = (greedy || temp <= 0.0f)
+                    ? sample_greedy(next_logits, vs, logit_biases)
+                    : sample(next_logits, vs, temp, topk, topp, minp, typical, rep, freq_penalty, presence_penalty, penalty_last_n, logit_biases, gen_history, false);
+            }
             t_sample_ms += now_ms() - t_sample0;
             ids.push_back(next);
             generated_tokens.push_back(next);
-            if (jsonl || stream) {
+            if (jsonl || stream || !stop_strings.empty()) {
                 char * piece = llama_runtime_detokenize_token(rt, next, false);
                 if (piece) utf8_pending += piece;
                 free(piece);
                 const std::string text = take_utf8_text(utf8_pending, step + 1 == steps);
+                const size_t before_append = generated_text.size();
+                generated_text += text;
+                const size_t stop_pos = find_stop_pos(generated_text, stop_strings);
+                stopped = stop_pos != std::string::npos;
+                const std::string visible_text = stopped
+                    ? generated_text.substr(before_append, stop_pos > before_append ? stop_pos - before_append : 0)
+                    : text;
                 if (jsonl) {
                     printf("{\"event\":\"token\",\"index\":%d,\"id\":%d,\"text\":\"%s\",\"logprob\":null}\n",
-                           step, next, json_escape(text).c_str());
-                } else if (!text.empty()) {
-                    fwrite(text.data(), 1, text.size(), stdout);
+                           step, next, json_escape(visible_text).c_str());
+                } else if (!visible_text.empty() && stop_strings.empty()) {
+                    fwrite(visible_text.data(), 1, visible_text.size(), stdout);
                 }
                 fflush(stdout);
             }
+            decoded_steps = step + 1;
+            if (stopped) break;
             gen_history.push_back(next);
+            if (llama_sampler) llama_runtime_sampler_accept(llama_sampler, next);
             int32_t next_i32 = next;
             const double t_decode0 = now_ms();
             logits = llama_runtime_eval_last_view(rt, &next_i32, 1);
             t_decode_ms += now_ms() - t_decode0;
         }
-        if (steps > 0) {
+        llama_runtime_sampler_free(llama_sampler);
+        if (decoded_steps > 0) {
             if (!jsonl && !stream) {
                 char * text = llama_runtime_detokenize_tokens(rt, generated_tokens.data(), (int)generated_tokens.size(), false);
                 if (text) {
-                    printf("%s\n", text);
+                    std::string output = text;
+                    const size_t stop_pos = find_stop_pos(output, stop_strings);
+                    if (stop_pos != std::string::npos) output.resize(stop_pos);
+                    printf("%s\n", output.c_str());
                     fflush(stdout);
                     free(text);
                 } else {
@@ -470,6 +569,11 @@ int main(int argc, char** argv) {
                 }
             }
             if (!jsonl && stream) {
+                if (!stop_strings.empty()) {
+                    const size_t stop_pos = find_stop_pos(generated_text, stop_strings);
+                    if (stop_pos != std::string::npos) generated_text.resize(stop_pos);
+                    fwrite(generated_text.data(), 1, generated_text.size(), stdout);
+                }
                 printf("\n");
                 fflush(stdout);
             }
@@ -482,15 +586,15 @@ int main(int argc, char** argv) {
         }
         LlamaRuntimePerf perf = llama_runtime_perf(rt);
         const double prefill_tps = t_prefill_ms > 0.0 ? (double)prefill_tokens * 1000.0 / t_prefill_ms : 0.0;
-        const double decode_tps = t_decode_ms > 0.0 ? (double)steps * 1000.0 / t_decode_ms : 0.0;
+        const double decode_tps = t_decode_ms > 0.0 ? (double)decoded_steps * 1000.0 / t_decode_ms : 0.0;
         if (jsonl) {
             printf("{\"event\":\"perf\",\"prefill_tokens_per_second\":%.3f,\"decode_tokens_per_second\":%.3f,\"decode_tokens\":%d}\n",
-                   prefill_tps, decode_tps, steps);
+                   prefill_tps, decode_tps, decoded_steps);
             fflush(stdout);
         }
         llama_runtime_free(rt);
         fprintf(stderr, "RINA_INFER_PERF {\"load_ms\":%.3f,\"prefill_ms\":%.3f,\"prefill_tokens\":%zu,\"prefill_tokens_per_second\":%.3f,\"decode_ms\":%.3f,\"decode_tokens\":%d,\"decode_tokens_per_second\":%.3f,\"sample_ms\":%.3f,\"llama_prompt_eval_ms\":%.3f,\"llama_prompt_tokens\":%d,\"llama_eval_ms\":%.3f,\"llama_eval_tokens\":%d,\"llama_graph_reused\":%d}\n",
-                t_load_ms, t_prefill_ms, prefill_tokens, prefill_tps, t_decode_ms, steps, decode_tps, t_sample_ms,
+                t_load_ms, t_prefill_ms, prefill_tokens, prefill_tps, t_decode_ms, decoded_steps, decode_tps, t_sample_ms,
                 perf.prompt_eval_ms, perf.prompt_tokens, perf.eval_ms, perf.eval_tokens, perf.graph_reused);
         if (!quiet) fprintf(stderr, "llama runtime done\n");
         return 0;
@@ -579,7 +683,7 @@ int main(int argc, char** argv) {
         cudaMemcpy(cpu.data(), d_logits + (T - 1) * cfg.vocab_size,
                    cfg.vocab_size * sizeof(float), cudaMemcpyDeviceToHost);
 
-        int next = sample(cpu.data(), cfg.vocab_size, temp, topk, topp, minp, typical, rep, freq_penalty, presence_penalty, penalty_last_n, gen, greedy);
+        int next = sample(cpu.data(), cfg.vocab_size, temp, topk, topp, minp, typical, rep, freq_penalty, presence_penalty, penalty_last_n, logit_biases, gen, greedy);
         gen.push_back(next);
         cudaMemcpyAsync(d_ids + gen.size() - 1, &next, sizeof(int), cudaMemcpyHostToDevice, s);
         cudaStreamSynchronize(s);

@@ -25,6 +25,10 @@ struct LlamaRuntime {
     int n_past = 0;
 };
 
+struct LlamaRuntimeSampler {
+    llama_sampler * sampler = nullptr;
+};
+
 static void llama_runtime_init_once() {
     static bool initialized = false;
     if (!initialized) {
@@ -477,4 +481,56 @@ float * llama_runtime_last_logits(LlamaRuntime * runtime) {
     if (!result) return nullptr;
     memcpy(result, row, logits_size);
     return result;
+}
+
+LlamaRuntimeSampler * llama_runtime_sampler_create(int vocab_size, bool greedy, uint32_t seed,
+                                                   float temp, int topk, float topp, float minp, float typical,
+                                                   float repeat_penalty, float frequency_penalty, float presence_penalty,
+                                                   int penalty_last_n, const int32_t * bias_tokens,
+                                                   const float * bias_values, int n_bias) {
+    llama_runtime_init_once();
+
+    llama_sampler_chain_params params = llama_sampler_chain_default_params();
+    params.no_perf = true;
+    llama_sampler * chain = llama_sampler_chain_init(params);
+    if (!chain) return nullptr;
+
+    std::vector<llama_logit_bias> biases;
+    for (int i = 0; i < n_bias; i++) {
+        if (bias_tokens[i] < 0 || bias_tokens[i] >= vocab_size) continue;
+        biases.push_back({bias_tokens[i], bias_values[i]});
+    }
+    if (!biases.empty()) {
+        llama_sampler_chain_add(chain, llama_sampler_init_logit_bias(vocab_size, (int32_t)biases.size(), biases.data()));
+    }
+
+    llama_sampler_chain_add(chain, llama_sampler_init_top_k(topk));
+    if (repeat_penalty != 1.0f || frequency_penalty != 0.0f || presence_penalty != 0.0f) {
+        llama_sampler_chain_add(chain, llama_sampler_init_penalties(penalty_last_n, repeat_penalty, frequency_penalty, presence_penalty));
+    }
+    if (typical > 0.0f && typical < 1.0f) llama_sampler_chain_add(chain, llama_sampler_init_typical(typical, 1));
+    if (topp > 0.0f && topp < 1.0f) llama_sampler_chain_add(chain, llama_sampler_init_top_p(topp, 1));
+    if (minp > 0.0f && minp < 1.0f) llama_sampler_chain_add(chain, llama_sampler_init_min_p(minp, 1));
+    llama_sampler_chain_add(chain, llama_sampler_init_temp(temp));
+    llama_sampler_chain_add(chain, greedy || temp <= 0.0f ? llama_sampler_init_greedy() : llama_sampler_init_dist(seed));
+
+    auto * wrapper = new LlamaRuntimeSampler();
+    wrapper->sampler = chain;
+    return wrapper;
+}
+
+void llama_runtime_sampler_free(LlamaRuntimeSampler * sampler) {
+    if (!sampler) return;
+    if (sampler->sampler) llama_sampler_free(sampler->sampler);
+    delete sampler;
+}
+
+void llama_runtime_sampler_accept(LlamaRuntimeSampler * sampler, int32_t token) {
+    if (!sampler || !sampler->sampler) return;
+    llama_sampler_accept(sampler->sampler, token);
+}
+
+int32_t llama_runtime_sampler_sample(LlamaRuntime * runtime, LlamaRuntimeSampler * sampler) {
+    if (!runtime || !runtime->ctx || !sampler || !sampler->sampler) return -1;
+    return llama_sampler_sample(sampler->sampler, runtime->ctx, -1);
 }

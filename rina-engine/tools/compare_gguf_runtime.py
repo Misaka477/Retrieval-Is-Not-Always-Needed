@@ -147,6 +147,9 @@ def main():
     parser.add_argument("--infer-ids", default=None, help="Optional token ids for low-level RINA ids API smoke test")
     parser.add_argument("--bench-prompt", type=int, default=0, help="Also run RINA prompt eval benchmark")
     parser.add_argument("--bench-reps", type=int, default=3, help="RINA prompt benchmark repetitions")
+    parser.add_argument("--min-prompt-ratio", type=float, default=0.0, help="Fail if RINA prompt throughput ratio is below this value")
+    parser.add_argument("--min-decode-ratio", type=float, default=0.0, help="Fail if RINA decode throughput ratio is below this value")
+    parser.add_argument("--perf-retries", type=int, default=1, help="Repeat performance commands and keep the best observed ratios")
     parser.add_argument("--show-output", action="store_true", help="Print raw command output")
     args = parser.parse_args()
 
@@ -284,8 +287,57 @@ def main():
     decode_ratio = None
     if llama_bench and rina_infer_perf and llama_bench.get("decode_tokens_per_second"):
         decode_ratio = rina_infer_perf["decode_tokens_per_second"] / llama_bench["decode_tokens_per_second"]
+    performance_attempts = [{"prompt": prompt_ratio, "decode": decode_ratio}]
+    perf_retry_count = max(1, args.perf_retries)
+    for _ in range(1, perf_retry_count):
+        if not (args.infer_steps > 0 or args.bench_prompt > 0):
+            break
+        retry_llama_bench_rc, retry_llama_bench_out = run(llama_bench_cmd, llama_dir, env)
+        retry_llama_bench = parse_llama_bench(retry_llama_bench_out)
+        retry_infer_perf = None
+        if args.infer_steps > 0:
+            retry_infer_rc, retry_infer_out = run(infer_cmd, rina_dir, env)
+            if retry_infer_rc == 0:
+                retry_infer_perf = parse_prefixed_json(retry_infer_out, "RINA_INFER_PERF")
+        retry_prompt_bench = None
+        if args.bench_prompt > 0:
+            retry_prompt_rc, retry_prompt_out = run(prompt_bench_cmd, rina_dir, env)
+            if retry_prompt_rc == 0:
+                retry_prompt_bench = parse_prefixed_json(retry_prompt_out, "RINA_PROMPT_BENCH")
+        if retry_llama_bench_rc != 0 or not retry_llama_bench:
+            performance_attempts.append({"prompt": None, "decode": None})
+            continue
+        retry_prompt_ratio = None
+        if retry_prompt_bench and retry_llama_bench.get("prompt_tokens_per_second"):
+            retry_prompt_ratio = retry_prompt_bench["tokens_per_second"] / retry_llama_bench["prompt_tokens_per_second"]
+            if prompt_ratio is None or retry_prompt_ratio > prompt_ratio:
+                prompt_ratio = retry_prompt_ratio
+                rina_prompt_bench = retry_prompt_bench
+        retry_decode_ratio = None
+        if retry_infer_perf and retry_llama_bench.get("decode_tokens_per_second"):
+            retry_decode_ratio = retry_infer_perf["decode_tokens_per_second"] / retry_llama_bench["decode_tokens_per_second"]
+            if decode_ratio is None or retry_decode_ratio > decode_ratio:
+                decode_ratio = retry_decode_ratio
+                rina_infer_perf = retry_infer_perf
+        performance_attempts.append({"prompt": retry_prompt_ratio, "decode": retry_decode_ratio})
+    perf_ok = True
+    perf_errors = []
+    if args.min_prompt_ratio > 0.0:
+        if prompt_ratio is None:
+            perf_ok = False
+            perf_errors.append("prompt ratio unavailable")
+        elif prompt_ratio < args.min_prompt_ratio:
+            perf_ok = False
+            perf_errors.append(f"prompt ratio {prompt_ratio:.6f} < {args.min_prompt_ratio:.6f}")
+    if args.min_decode_ratio > 0.0:
+        if decode_ratio is None:
+            perf_ok = False
+            perf_errors.append("decode ratio unavailable")
+        elif decode_ratio < args.min_decode_ratio:
+            perf_ok = False
+            perf_errors.append(f"decode ratio {decode_ratio:.6f} < {args.min_decode_ratio:.6f}")
     result = {
-        "ok": rel_error <= args.tolerance,
+        "ok": rel_error <= args.tolerance and perf_ok,
         "context": args.context,
         "stride": args.stride,
         "llama": llama,
@@ -295,6 +347,12 @@ def main():
             "prompt": prompt_ratio,
             "decode": decode_ratio,
         },
+        "performance_threshold": {
+            "prompt": args.min_prompt_ratio,
+            "decode": args.min_decode_ratio,
+        },
+        "performance_attempts": performance_attempts,
+        "performance_errors": perf_errors,
         "rina": rina,
         "rina_infer_perf": rina_infer_perf,
         "rina_detokenize_smoke": detokenize_smoke,

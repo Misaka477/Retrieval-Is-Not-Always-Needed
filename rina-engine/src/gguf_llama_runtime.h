@@ -4,6 +4,7 @@
 #include <cstdint>
 
 struct LlamaRuntime;
+struct LlamaRuntimeSampler;
 
 struct LlamaRuntimePerf {
     double prompt_eval_ms = 0.0;
@@ -32,5 +33,13 @@ void llama_runtime_reset(LlamaRuntime * runtime);
 float * llama_runtime_eval(LlamaRuntime * runtime, const int32_t * tokens, int n_tokens, bool all_logits);
 const float * llama_runtime_eval_last_view(LlamaRuntime * runtime, const int32_t * tokens, int n_tokens);
 float * llama_runtime_last_logits(LlamaRuntime * runtime);
+LlamaRuntimeSampler * llama_runtime_sampler_create(int vocab_size, bool greedy, uint32_t seed,
+                                                   float temp, int topk, float topp, float minp, float typical,
+                                                   float repeat_penalty, float frequency_penalty, float presence_penalty,
+                                                   int penalty_last_n, const int32_t * bias_tokens,
+                                                   const float * bias_values, int n_bias);
+void llama_runtime_sampler_free(LlamaRuntimeSampler * sampler);
+void llama_runtime_sampler_accept(LlamaRuntimeSampler * sampler, int32_t token);
+int32_t llama_runtime_sampler_sample(LlamaRuntime * runtime, LlamaRuntimeSampler * sampler);
 
 #endif // GGUF_LLAMA_RUNTIME_H
